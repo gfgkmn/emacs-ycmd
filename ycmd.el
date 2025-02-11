@@ -157,7 +157,21 @@ Options are:
   "The host on which the ycmd server is running."
   :type '(string))
 
-(defcustom ycmd-server-command nil
+(defcustom ycmd-remote-host "192.168.53.81"
+  "The host on which the ycmd server is running."
+  :type '(string))
+
+(defcustom ycmd-local-server-command nil
+  "The ycmd server program command.
+
+The value is a list of arguments to run the ycmd server.
+Example value:
+
+\(set-variable 'ycmd-server-command (\"python\" \"/path/to/ycmd/package/\"))"
+  :type '(repeat string))
+
+
+(defcustom ycmd-remote-server-command nil
   "The ycmd server program command.
 
 The value is a list of arguments to run the ycmd server.
@@ -168,7 +182,8 @@ Example value:
 
 (defcustom ycmd-server-args '("--log=debug"
                               "--keep_logfile"
-                              "--idle_suicide_seconds=10800")
+                              "--idle_suicide_seconds=10800"
+                              "--host=0.0.0.0")
   "Extra arguments to pass to the ycmd server."
   :type '(repeat string))
 
@@ -364,7 +379,12 @@ engine."
   "Racerd binary path."
   :type 'string)
 
-(defcustom ycmd-python-binary-path nil
+(defcustom ycmd-local-python-binary-path nil
+  "Python binary path."
+  :type 'string)
+
+
+(defcustom ycmd-remote-python-binary-path nil
   "Python binary path."
   :type 'string)
 
@@ -700,6 +720,24 @@ explicitly re-define the prefix key:
   `(when ,timer
      (cancel-timer ,timer)
      (setq ,timer nil)))
+
+(defun ycmd-get-host ()
+  (if (file-remote-p default-directory)
+      ycmd-remote-host
+    ycmd-host))
+
+(defun ycmd-server-command ()
+  "Return the ycmd server command.according local or remote."
+  (if (file-remote-p default-directory)
+      ycmd-remote-server-command
+    ycmd-local-server-command))
+
+
+(defun ycmd-get-python-binary-path ()
+  "Get the appropriate Python binary path based on whether we're using Tramp or not."
+  (if (file-remote-p default-directory)
+      (or ycmd-remote-python-binary-path "")
+    (or ycmd-local-python-binary-path "")))
 
 (defun ycmd-parsing-in-progress-p ()
   "Return t if parsing is in progress."
@@ -2098,7 +2136,7 @@ file."
         (rust-src-path (or ycmd-rust-src-path ""))
         (swift-src-path (or ycmd-swift-src-path ""))
         (racerd-binary-path (or ycmd-racerd-binary-path ""))
-        (python-binary-path (or ycmd-python-binary-path ""))
+        (python-binary-path (ycmd-get-python-binary-path))
         (auto-trigger (if ycmd-auto-trigger-semantic-completion 1 0)))
     `((filepath_completion_use_working_dir . 0)
       (auto_trigger . ,auto-trigger)
@@ -2130,11 +2168,18 @@ file."
 
 This creates a new tempfile and fills it with options.  Returns
 the name of the newly created file."
-  (let ((options-file (make-temp-file "ycmd-options"))
-        (options (ycmd--options-contents hmac-secret)))
+  (let* ((temporary-file-directory
+          (if (file-remote-p default-directory)
+              (concat (file-remote-p default-directory) "/tmp")
+            temporary-file-directory))
+         (options-file (make-temp-file "ycmd-options"))
+         (options (ycmd--options-contents hmac-secret)))
     (with-temp-file options-file
       (insert (ycmd--json-encode options)))
-    options-file))
+    (if (tramp-tramp-file-p options-file)
+        (tramp-file-name-localname
+         (tramp-dissect-file-name options-file))
+      options-file)))
 
 (defun ycmd--exit-code-as-string (code)
   "Return exit status message for CODE."
@@ -2204,7 +2249,7 @@ If `ycmd-bypass-url-proxy-services' is non-nil, prepend
 
 (defun ycmd--start-server ()
   "Start a new server and return the process."
-  (unless ycmd-server-command
+  (unless (ycmd-server-command)
     (user-error "Error: The variable `ycmd-server-command' is not set.  \
 See the docstring of the variable for an example"))
   (let ((proc-buff (get-buffer-create ycmd--server-buffer-name)))
@@ -2222,10 +2267,12 @@ See the docstring of the variable for an example"))
            (args (append (and port (list (format "--port=%d" port)))
                          (list (concat "--options_file=" options-file))
                          ycmd-server-args))
-           (server-program+args (append ycmd-server-command args))
+           (server-program+args (append (ycmd-server-command) args))
            (process-environment (ycmd--get-process-environment))
-           (proc (apply #'start-process ycmd--server-process-name proc-buff
+           (proc (apply #'start-file-process ycmd--server-process-name proc-buff
                         server-program+args)))
+      (prin1 proc)
+      (message "Starting ycmd server with command: %s" server-program+args)
       (ycmd--with-all-ycmd-buffers
         (ycmd--report-status 'starting))
       (setq ycmd--server-actual-port nil
@@ -2334,7 +2381,7 @@ This is useful for debugging.")
                               'face (if running 'success '(warning bold))))
           (when running
             (insert
-             (format " at: %s:%d" ycmd-host ycmd--server-actual-port))))
+             (format " at: %s:%d" (ycmd-get-host) ycmd--server-actual-port))))
         (princ "\n\n")
         (princ "Ycmd Mode is ")
         (let ((enabled (buffer-local-value 'ycmd-mode buffer)))
@@ -2453,7 +2500,7 @@ anything like that)."
          (hmac (ycmd--get-request-hmac type path content))
          (encoded-hmac (base64-encode-string hmac 't))
          (url (format "http://%s:%s%s"
-                      ycmd-host ycmd--server-actual-port path))
+                      (ycmd-get-host) ycmd--server-actual-port path))
          (headers `(("Content-Type" . "application/json")
                     ("X-Ycm-Hmac" . ,encoded-hmac)))
          (parser (lambda ()
