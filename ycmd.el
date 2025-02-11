@@ -1438,14 +1438,15 @@ Useful in case compile-time is considerable."
 
 (defun ycmd--goto-location (location find-function)
   "Move cursor to LOCATION with FIND-FUNCTION.
-
-LOCATION is a structure as returned from e.g. the various GoTo
-commands."
+LOCATION is a structure as returned from e.g. the various GoTo commands."
   (let-alist location
     (when .filepath
-      (funcall find-function .filepath)
-      (goto-char (ycmd--col-line-to-position
-                  .column_num .line_num)))))
+      (let ((filepath (if (file-remote-p .filepath)
+                         .filepath  ; already has TRAMP prefix, use as is
+                       (concat (file-remote-p default-directory) .filepath))))  ; add TRAMP prefix from current buffer
+        (funcall find-function filepath)
+        (goto-char (ycmd--col-line-to-position
+                   .column_num .line_num))))))
 
 (defun ycmd--goto-line (line)
   "Go to LINE."
