@@ -149,8 +149,8 @@ Options are:
 `ask'
      Ask the user for each unknown extra conf."
   :type '(choice (const :tag "Load unknown extra confs" load)
-                 (const :tag "Ignore unknown extra confs" ignore)
-                 (const :tag "Ask the user" ask))
+          (const :tag "Ignore unknown extra confs" ignore)
+          (const :tag "Ask the user" ask))
   :risky t)
 
 (defcustom ycmd-host "127.0.0.1"
@@ -246,10 +246,10 @@ buffer for new completion:
 If nil, never set buffer-needs-parse flag.  For a manual reparse,
 use `ycmd-parse-buffer'."
   :type '(set (const :tag "After the buffer was saved" save)
-              (const :tag "After a new line was inserted" new-line)
-              (const :tag "After a buffer was changed and idle" idle-change)
-              (const :tag "After a `ycmd-mode' was enabled" mode-enabled)
-              (const :tag "After an unparsed buffer gets focus" buffer-focus))
+          (const :tag "After a new line was inserted" new-line)
+          (const :tag "After a buffer was changed and idle" idle-change)
+          (const :tag "After a `ycmd-mode' was enabled" mode-enabled)
+          (const :tag "After an unparsed buffer gets focus" buffer-focus))
   :safe #'listp)
 
 (defcustom ycmd-default-tags-file-name "tags"
@@ -295,10 +295,10 @@ string
 list
     A list of tag file names."
   :type '(choice (const :tag "Don't use tag file." nil)
-                 (const :tag "Locate tags file automatically" auto)
-                 (string :tag "Tag file name")
-                 (repeat :tag "List of tag files"
-                         (string :tag "Tag file name")))
+          (const :tag "Locate tags file automatically" auto)
+          (string :tag "Tag file name")
+          (repeat :tag "List of tag files"
+                  (string :tag "Tag file name")))
   :safe (lambda (obj)
           (or (symbolp obj)
               (stringp obj)
@@ -383,6 +383,9 @@ engine."
   "Python binary path."
   :type 'string)
 
+(defcustom ycmd-current-machine nil
+  "Python binary path."
+  :type 'string)
 
 (defcustom ycmd-remote-python-binary-path nil
   "Python binary path."
@@ -399,12 +402,12 @@ for all major-modes.  If a list, ycmd mode is turned on for all
 in that list.  If nil, ycmd mode is never turned on by
 `global-ycmd-mode'."
   :type '(choice (const :tag "none" nil)
-                 (const :tag "member in `ycmd-file-type-map'" t)
-                 (const :tag "all" all)
-                 (set :menu-tag "mode specific" :tag "modes"
-                      :value (not)
-                      (const :tag "Except" not)
-                      (repeat :inline t (symbol :tag "mode")))))
+          (const :tag "member in `ycmd-file-type-map'" t)
+          (const :tag "all" all)
+          (set :menu-tag "mode specific" :tag "modes"
+               :value (not)
+               (const :tag "Except" not)
+               (repeat :inline t (symbol :tag "mode")))))
 
 (defcustom ycmd-confirm-fixit t
   "Whether to confirm when applying fixit on line."
@@ -446,8 +449,8 @@ This variable is a normal hook.  See Info node `(elisp)Hooks'."
 The function must be compatible to the built-in `completing-read'
 function."
   :type '(choice (const :tag "Default" completing-read)
-                 (const :tag "IDO" ido-completing-read)
-                 (function :tag "Custom function"))
+          (const :tag "IDO" ido-completing-read)
+          (function :tag "Custom function"))
   :risky t
   :package-version '(ycmd . "1.2"))
 
@@ -571,21 +574,20 @@ function."
 Keywords source: https://github.com/auto-complete/auto-complete/tree/master/dict
 and `company-keywords'.")
 
-(defvar ycmd--server-actual-port nil
+(defvar ycmd--server-actual-port-dict (make-hash-table :test 'equal)
   "The actual port being used by the ycmd server.
 This is set based on the value of `ycmd-server-port' if set, or
 the value from the output of the server itself.")
 
-(defvar ycmd--hmac-secret nil
+(defvar ycmd--server-process-name-dict (make-hash-table :test 'equal)
+  "Dictionary to store ycmd server process names for different machines.")
+
+(defvar ycmd--server-hmac-dict (make-hash-table :test 'equal)
   "This is populated with the hmac secret of the current connection.
 Users should never need to modify this, hence the defconst.  It is
 not, however, treated as a constant by this code.  This value gets
 set in ycmd-open.")
 
-(defconst ycmd--server-process-name "ycmd-server"
-  "The Emacs name of the server process.
-This is used by functions like `start-process', `get-process'
-and `delete-process'.")
 
 (defvar-local ycmd--notification-timer nil
   "Timer for notifying ycmd server to do work, e.g. parsing files.")
@@ -725,6 +727,9 @@ explicitly re-define the prefix key:
   (if (file-remote-p default-directory)
       ycmd-remote-host
     ycmd-host))
+
+(defun ycmd-get-port ()
+  (gethash (ycmd--get-current-machine) ycmd--server-actual-port-dict))
 
 (defun ycmd-server-command ()
   "Return the ycmd server command.according local or remote."
@@ -879,17 +884,17 @@ If FORCE-DEFERRED is non-nil perform parse notification later."
         (ycmd--parse-deferred)
       (let ((buffer (current-buffer)))
         (deferred:$
-          (deferred:next
-            (lambda ()
-              (with-current-buffer buffer
-                (ycmd--on-visit-buffer))))
-          (deferred:nextc it
-            (lambda ()
-              (with-current-buffer buffer
-                (let ((tick (buffer-chars-modified-tick)))
-                  (unless (equal tick ycmd--last-modified-tick)
-                    (setq ycmd--last-modified-tick tick)
-                    (ycmd-notify-file-ready-to-parse)))))))))))
+         (deferred:next
+          (lambda ()
+            (with-current-buffer buffer
+              (ycmd--on-visit-buffer))))
+         (deferred:nextc it
+                         (lambda ()
+                           (with-current-buffer buffer
+                             (let ((tick (buffer-chars-modified-tick)))
+                               (unless (equal tick ycmd--last-modified-tick)
+                                 (setq ycmd--last-modified-tick tick)
+                                 (ycmd-notify-file-ready-to-parse)))))))))))
 
 (defun ycmd--on-save ()
   "Function to run when the buffer has been saved."
@@ -946,13 +951,13 @@ _LEN is ununsed."
   (and (listp response) (assq 'exception response)))
 
 (cl-defmacro ycmd-with-handled-server-exceptions (request
-                                                  &rest body
-                                                  &key
-                                                  dont-show-exception-msg
-                                                  on-exception-form
-                                                  return-form
-                                                  bind-current-buffer
-                                                  &allow-other-keys)
+                                                   &rest body
+                                                   &key
+                                                   dont-show-exception-msg
+                                                   on-exception-form
+                                                   return-form
+                                                   bind-current-buffer
+                                                   &allow-other-keys)
   "Run a deferred REQUEST and exectute BODY on success. Catch all
 exceptions raised through server communication. If it is raised
 because of a unknown .ycm_extra_conf.py file, load the file or
@@ -969,27 +974,27 @@ BIND-CURRENT-BUFFER &rest BODY)"
     (setq body (cdr (cdr body))))
   `(let ((request-buffer (and ,bind-current-buffer (current-buffer))))
      (deferred:$
-       ,request
-       (deferred:nextc it
-         (lambda (response)
-           (cl-macrolet ((with-optional-current-buffer
-                          (buffer-or-name &rest body-2)
-                          `(if ,buffer-or-name
-                               (with-current-buffer ,buffer-or-name
-                                 ,@body-2)
-                             ,@body-2)))
-             (with-optional-current-buffer
-              request-buffer
-              (if (ycmd--exception-p response)
-                  (let-alist response
-                    (if (string= .exception.TYPE "UnknownExtraConf")
-                        (ycmd--handle-extra-conf-exception
-                         .exception.extra_conf_file)
-                      (unless ,dont-show-exception-msg
-                        (message "%s: %s" .exception.TYPE .message))
-                      ,on-exception-form
-                      ,return-form))
-                (if (null ',body) response ,@body)))))))))
+      ,request
+      (deferred:nextc it
+                      (lambda (response)
+                        (cl-macrolet ((with-optional-current-buffer
+                                        (buffer-or-name &rest body-2)
+                                        `(if ,buffer-or-name
+                                             (with-current-buffer ,buffer-or-name
+                                               ,@body-2)
+                                           ,@body-2)))
+                          (with-optional-current-buffer
+                           request-buffer
+                           (if (ycmd--exception-p response)
+                               (let-alist response
+                                 (if (string= .exception.TYPE "UnknownExtraConf")
+                                     (ycmd--handle-extra-conf-exception
+                                      .exception.extra_conf_file)
+                                   (unless ,dont-show-exception-msg
+                                     (message "%s: %s" .exception.TYPE .message))
+                                   ,on-exception-form
+                                   ,return-form))
+                             (if (null ',body) response ,@body)))))))))
 
 (defun ycmd--on-visit-buffer ()
   "If `ycmd--buffer-visit-flag' is nil send BufferVisit event."
@@ -1057,10 +1062,10 @@ time."
     (let ((last-value 'deferred:undefined*)
           uncaught-error)
       (deferred:try
-        (deferred:nextc d
-          (lambda (x) (setq last-value x)))
-        :catch
-        (lambda (err) (setq uncaught-error err)))
+       (deferred:nextc d
+                       (lambda (x) (setq last-value x)))
+       :catch
+       (lambda (err) (setq uncaught-error err)))
       (with-local-quit
         (while (and (eq 'deferred:undefined* last-value)
                     (not uncaught-error))
@@ -1078,9 +1083,9 @@ macro, which takes the timeout var in seconds and the timeout
 form returns the symbol `timeout'."
   (declare (indent 1) (debug t))
   `(deferred:earlier
-     (deferred:nextc (deferred:wait (* ,timeout-sec 1000))
-       (lambda () 'timeout))
-     ,d))
+    (deferred:nextc (deferred:wait (* ,timeout-sec 1000))
+                    (lambda () 'timeout))
+    ,d))
 
 (defun ycmd-open ()
   "Start a new ycmd server.
@@ -1125,16 +1130,43 @@ process with `delete-process'."
                      (- (float-time) start-time)))
         (sit-for 0.05))))
   (ignore-errors
-    (delete-process ycmd--server-process-name)))
+    (let ((proc-name (gethash (ycmd--get-current-machine) ycmd--server-process-name-dict)))
+      (when proc-name
+        (delete-process proc-name)))))
+
+
+(defvar ycmd--server-process-name-dict (make-hash-table :test 'equal)
+  "Dictionary to store ycmd server process names for different machines.")
+
+
+(defun ycmd--get-current-machine ()
+  "Get current machine identifier from default-directory.
+Returns 'local for local machine, or hostname for remote machines."
+  (if (file-remote-p default-directory)
+      (file-remote-p default-directory 'host)
+    'local))
+
+(defun ycmd--get-server-process-name ()
+  "Get ycmd server process name for current machine from dictionary.
+If not found, create new entry with format 'ycmd-server-{machine}'."
+  (let* ((machine (ycmd--get-current-machine))
+         (process-name (gethash machine ycmd--server-process-name-dict)))
+    (or process-name
+        (puthash machine
+                 (if (eq machine 'local)
+                     "ycmd-server"
+                   (format "ycmd-server-%s" machine))
+                 ycmd--server-process-name-dict))))
+
 
 (defun ycmd-running-p ()
   "Return t if a ycmd server is already running."
-  (--when-let (get-process ycmd--server-process-name)
+  (--when-let (get-process (ycmd--get-server-process-name))
     (and (processp it) (process-live-p it) t)))
 
 (defun ycmd--server-alive-p ()
   "Return t if server is running and ready for requests."
-  (and (ycmd-running-p) ycmd--server-actual-port))
+  (and (ycmd-running-p) (ycmd-get-port)))
 
 (defmacro ycmd--ignore-errors (&rest body)
   "Execute BODY and ignore errors and request errors."
@@ -1480,11 +1512,11 @@ LOCATION is a structure as returned from e.g. the various GoTo commands."
   (let-alist location
     (when .filepath
       (let ((filepath (if (file-remote-p .filepath)
-                         .filepath  ; already has TRAMP prefix, use as is
-                       (concat (file-remote-p default-directory) .filepath))))  ; add TRAMP prefix from current buffer
+                          .filepath  ; already has TRAMP prefix, use as is
+                        (concat (file-remote-p default-directory) .filepath))))  ; add TRAMP prefix from current buffer
         (funcall find-function filepath)
         (goto-char (ycmd--col-line-to-position
-                   .column_num .line_num))))))
+                    .column_num .line_num))))))
 
 (defun ycmd--goto-line (line)
   "Go to LINE."
@@ -1999,16 +2031,16 @@ cannot send parse request")
     (when (ycmd--server-alive-p)
       (let ((buffer (current-buffer)))
         (deferred:$
-          (deferred:next
-            (lambda ()
-              (message "Parsing buffer...")
-              (ycmd--reset-parse-status)
-              (ycmd--conditional-parse)))
-          (deferred:nextc it
-            (lambda ()
-              (with-current-buffer buffer
-                (when (eq ycmd--last-status-change 'parsed)
-                  (message "Parsing buffer done"))))))))))
+         (deferred:next
+          (lambda ()
+            (message "Parsing buffer...")
+            (ycmd--reset-parse-status)
+            (ycmd--conditional-parse)))
+         (deferred:nextc it
+                         (lambda ()
+                           (with-current-buffer buffer
+                             (when (eq ycmd--last-status-change 'parsed)
+                               (message "Parsing buffer done"))))))))))
 
 (defun ycmd--handle-extra-conf-exception (conf-file)
   "Handle an exception of type `UnknownExtraConf'.
@@ -2031,14 +2063,14 @@ Optional EXTRA-DATA contains additional data for the request."
                          (ycmd--get-basic-request-data)
                          extra-data)))
     (deferred:try
-      (ycmd--request (make-ycmd-request-data
-                      :handler "event_notification"
-                      :content content))
-      :catch
-      (lambda (err)
-        (message "Error sending %s request: %s" event-name err)
-        (ycmd--report-status 'errored)
-        nil))))
+     (ycmd--request (make-ycmd-request-data
+                     :handler "event_notification"
+                     :content content))
+     :catch
+     (lambda (err)
+       (message "Error sending %s request: %s" event-name err)
+       (ycmd--report-status 'errored)
+       nil))))
 
 (defun ycmd-notify-file-ready-to-parse ()
   "Send a notification to ycmd that the buffer is ready to be parsed.
@@ -2224,12 +2256,13 @@ the name of the newly created file."
           (set-marker (process-mark process) (point)))
         (when moving (goto-char (process-mark process))))))
   ;; parse port from server output
-  (when (and (not ycmd--server-actual-port)
+  (when (and (not (ycmd-get-port))
              (string-match "^serving on http://.*:\\\([0-9]+\\\)$"
                            string))
     (ycmd--kill-timer ycmd--server-timeout-timer)
-    (setq ycmd--server-actual-port
-          (string-to-number (match-string 1 string)))
+    (puthash (ycmd--get-current-machine)
+             (string-to-number (match-string 1 string))
+             ycmd--server-actual-port-dict)
     (ycmd--with-all-ycmd-buffers
       (ycmd--reset-parse-status))
     (ycmd--perform-deferred-parse)))
@@ -2269,14 +2302,18 @@ See the docstring of the variable for an example"))
                          ycmd-server-args))
            (server-program+args (append (ycmd-server-command) args))
            (process-environment (ycmd--get-process-environment))
-           (proc (apply #'start-file-process ycmd--server-process-name proc-buff
+           (proc (apply #'start-file-process (ycmd--get-server-process-name) proc-buff
                         server-program+args)))
       (prin1 proc)
       (message "Starting ycmd server with command: %s" server-program+args)
       (ycmd--with-all-ycmd-buffers
         (ycmd--report-status 'starting))
-      (setq ycmd--server-actual-port nil
-            ycmd--hmac-secret hmac-secret)
+      (puthash (ycmd--get-current-machine)
+               hmac-secret
+               ycmd--server-hmac-dict)
+      (puthash (ycmd--get-current-machine)
+               nil
+               ycmd--server-actual-port-dict)
       (set-process-query-on-exit-flag proc nil)
       (set-process-sentinel proc #'ycmd--server-process-sentinel)
       (set-process-filter proc #'ycmd--server-process-filter)
@@ -2381,7 +2418,7 @@ This is useful for debugging.")
                               'face (if running 'success '(warning bold))))
           (when running
             (insert
-             (format " at: %s:%d" (ycmd-get-host) ycmd--server-actual-port))))
+             (format " at: %s:%d" (ycmd-get-host) (ycmd-get-port)))))
         (princ "\n\n")
         (princ "Ycmd Mode is ")
         (let ((enabled (buffer-local-value 'ycmd-mode buffer)))
@@ -2448,9 +2485,9 @@ Response is non-nil if semantic complettion is available."
   (ycmd--hmac-function
    (mapconcat (lambda (val)
                 (ycmd--hmac-function
-                 (ycmd--encode-string val) ycmd--hmac-secret))
+                 (ycmd--encode-string val) (gethash (ycmd--get-current-machine) ycmd--server-hmac-dict)))
               `(,method ,path ,(or body "")) "")
-   ycmd--hmac-secret))
+   (gethash (ycmd--get-current-machine) ycmd--server-hmac-dict)))
 
 (cl-defstruct ycmd-request-data
   "Structure for storing the ycmd server request data.
@@ -2500,7 +2537,7 @@ anything like that)."
          (hmac (ycmd--get-request-hmac type path content))
          (encoded-hmac (base64-encode-string hmac 't))
          (url (format "http://%s:%s%s"
-                      (ycmd-get-host) ycmd--server-actual-port path))
+                      (ycmd-get-host) (ycmd-get-port) path))
          (headers `(("Content-Type" . "application/json")
                     ("X-Ycm-Hmac" . ,encoded-hmac)))
          (parser (lambda ()
@@ -2509,13 +2546,13 @@ anything like that)."
     (ycmd--log-content "HTTP REQUEST CONTENT" content)
 
     (deferred:$
-      (request-deferred url :type type :params params :data content
-                        :parser parser :headers headers)
-      (deferred:nextc it
-        (lambda (response)
-          (let ((data (request-response-data response)))
-            (ycmd--log-content "HTTP RESPONSE CONTENT" data)
-            data))))))
+     (request-deferred url :type type :params params :data content
+                       :parser parser :headers headers)
+     (deferred:nextc it
+                     (lambda (response)
+                       (let ((data (request-response-data response)))
+                         (ycmd--log-content "HTTP RESPONSE CONTENT" data)
+                         data))))))
 
 (provide 'ycmd)
 
