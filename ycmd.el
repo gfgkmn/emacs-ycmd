@@ -153,13 +153,11 @@ Options are:
           (const :tag "Ask the user" ask))
   :risky t)
 
-(defcustom ycmd-host "127.0.0.1"
-  "The host on which the ycmd server is running."
-  :type '(string))
+(defcustom ycmd-host-mapping (make-hash-table :test 'equal)
+  "Mapping of host names to their actual addresses for ycmd server connection."
+  :type '(alist :key-type string :value-type string)
+  :group 'ycmd)
 
-(defcustom ycmd-remote-host "192.168.53.81"
-  "The host on which the ycmd server is running."
-  :type '(string))
 
 (defcustom ycmd-local-server-command nil
   "The ycmd server program command.
@@ -724,9 +722,7 @@ explicitly re-define the prefix key:
      (setq ,timer nil)))
 
 (defun ycmd-get-host ()
-  (if (file-remote-p default-directory)
-      ycmd-remote-host
-    ycmd-host))
+  (gethash (ycmd--get-current-machine) ycmd-host-mapping))
 
 (defun ycmd-get-port ()
   (gethash (ycmd--get-current-machine) ycmd--server-actual-port-dict))
@@ -2277,7 +2273,7 @@ If `ycmd-bypass-url-proxy-services' is non-nil, prepend
                          (not (or (getenv "NO_PROXY")
                                   (getenv "no_PROXY")
                                   (getenv "no_proxy")))
-                         (list (concat "NO_PROXY=" ycmd-host)))
+                         (list (concat "NO_PROXY=" "127.0.0.1")))
                     process-environment))))
 
 (defun ycmd--start-server ()
