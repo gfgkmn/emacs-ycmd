@@ -154,9 +154,7 @@ Options are:
   :risky t)
 
 (defcustom ycmd-host-mapping (make-hash-table :test 'equal)
-  "Mapping of host names to their actual addresses for ycmd server connection."
-  :type '(alist :key-type string :value-type string)
-  :group 'ycmd)
+  "Mapping of host names to their actual addresses for ycmd server connection.")
 
 
 (defcustom ycmd-local-server-command nil
@@ -722,7 +720,7 @@ explicitly re-define the prefix key:
      (setq ,timer nil)))
 
 (defun ycmd-get-host ()
-  (gethash (ycmd--get-current-machine) ycmd-host-mapping))
+  (gethash (prin1-to-string (ycmd--get-current-machine)) ycmd-host-mapping))
 
 (defun ycmd-get-port ()
   (gethash (ycmd--get-current-machine) ycmd--server-actual-port-dict))
