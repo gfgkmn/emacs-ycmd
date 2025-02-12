@@ -162,6 +162,13 @@ Options are:
 Set this to enable YCMD on specific Wi-Fi networks by adding the network names to this list."
   :type '(repeat string))
 
+(defcustom ycmd-office-wifi-name nil
+  "List of WiFi names considered as office networks.
+When connected to these networks, ycmd server will be started automatically.
+Each element should be a string representing a WiFi network name (SSID).
+For example: '(\"office-wifi\" \"company-network\")"
+  :type '(repeat string))
+
 
 (defcustom ycmd-local-server-command nil
   "The ycmd server program command.
@@ -743,13 +750,13 @@ explicitly re-define the prefix key:
 
 (defun ycmd-get-host ()
   (let ((wifi-name (or ycmd-wifi-name
-                      (ycmd-set-wifi-name))))
-    (if (string-match-p ".*caiyun.*" ycmd-wifi-name)
+                       (ycmd-set-wifi-name))))
+    (if (string-match-p (concat ".*" ycmd-office-wifi-name ".*") ycmd-wifi-name)
         (gethash (if (stringp (ycmd--get-current-machine))
                      (ycmd--get-current-machine)
                    (prin1-to-string (ycmd--get-current-machine)))
                  ycmd-host-mapping)
-        "127.0.0.1")))
+      "127.0.0.1")))
 
 (defun ycmd-get-server-port ()
   (string-to-number (gethash (if (stringp (ycmd--get-current-machine))
