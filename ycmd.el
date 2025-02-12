@@ -157,6 +157,12 @@ Options are:
   "Mapping of host names to their actual addresses for ycmd server connection.")
 
 
+(defcustom ycmd-wifi-name nil
+  "List of Wi-Fi network names for YCMD server connectivity.
+Set this to enable YCMD on specific Wi-Fi networks by adding the network names to this list."
+  :type '(repeat string))
+
+
 (defcustom ycmd-local-server-command nil
   "The ycmd server program command.
 
@@ -182,10 +188,6 @@ Example value:
                               "--host=0.0.0.0")
   "Extra arguments to pass to the ycmd server."
   :type '(repeat string))
-
-(defcustom ycmd-server-port nil
-  "The ycmd server port.  If nil, use random port."
-  :type '(number))
 
 (defcustom ycmd-file-parse-result-hook nil
   "Functions to run with file-parse results.
@@ -575,6 +577,17 @@ and `company-keywords'.")
 This is set based on the value of `ycmd-server-port' if set, or
 the value from the output of the server itself.")
 
+(defvar ycmd-port-mapping (make-hash-table :test 'equal)
+  "Hash table mapping host names to YCMD server port numbers.
+
+Use this variable to associate specific host names with the corresponding port
+numbers on which the YouCompleteMe Daemon (YCMD) is running. The hash table uses
+string equality for keys, allowing for precise host name matching.
+
+Example Usage:
+(puthash \"localhost\" 12345 ycmd-port-mapping)
+(puthash \"my-workstation\" 54321 ycmd-port-mapping)")
+
 (defvar ycmd--server-process-name-dict (make-hash-table :test 'equal)
   "Dictionary to store ycmd server process names for different machines.")
 
@@ -719,8 +732,29 @@ explicitly re-define the prefix key:
      (cancel-timer ,timer)
      (setq ,timer nil)))
 
+
+(defun ycmd-set-wifi-name ()
+  "Set current WiFi name using system profiler command."
+  (interactive)
+  (setq ycmd-wifi-name
+        (string-trim
+         (shell-command-to-string
+          "system_profiler SPAirPortDataType | grep -A2 'Status: Connected' | tail -n1 | sed 's/:$//' | awk '{print $NF}'"))))
+
 (defun ycmd-get-host ()
-  (gethash (prin1-to-string (ycmd--get-current-machine)) ycmd-host-mapping))
+  (let ((wifi-name (or ycmd-wifi-name
+                      (ycmd-set-wifi-name))))
+    (if (string-match-p ".*caiyun.*" ycmd-wifi-name)
+        (gethash (if (stringp (ycmd--get-current-machine))
+                     (ycmd--get-current-machine)
+                   (prin1-to-string (ycmd--get-current-machine)))
+                 ycmd-host-mapping)
+        "127.0.0.1")))
+
+(defun ycmd-get-server-port ()
+  (string-to-number (gethash (if (stringp (ycmd--get-current-machine))
+                                 (ycmd--get-current-machine)
+                               (prin1-to-string (ycmd--get-current-machine))) ycmd-port-mapping)))
 
 (defun ycmd-get-port ()
   (gethash (ycmd--get-current-machine) ycmd--server-actual-port-dict))
@@ -730,7 +764,6 @@ explicitly re-define the prefix key:
   (if (file-remote-p default-directory)
       ycmd-remote-server-command
     ycmd-local-server-command))
-
 
 (defun ycmd-get-python-binary-path ()
   "Get the appropriate Python binary path based on whether we're using Tramp or not."
@@ -2286,9 +2319,9 @@ See the docstring of the variable for an example"))
         (buffer-disable-undo)
         (erase-buffer)))
     (setq ycmd--process-environment nil)
-    (let* ((port (and (numberp ycmd-server-port)
-                      (> ycmd-server-port 0)
-                      ycmd-server-port))
+    (let* ((port (and (numberp (ycmd-get-server-port))
+                      (> (ycmd-get-server-port) 0)
+                      (ycmd-get-server-port)))
            (hmac-secret (ycmd--generate-hmac-secret))
            (options-file (ycmd--create-options-file hmac-secret))
            (args (append (and port (list (format "--port=%d" port)))
