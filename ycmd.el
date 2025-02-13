@@ -167,7 +167,7 @@ Set this to enable YCMD on specific Wi-Fi networks by adding the network names t
 When connected to these networks, ycmd server will be started automatically.
 Each element should be a string representing a WiFi network name (SSID).
 For example: '(\"office-wifi\" \"company-network\")"
-  :type '(repeat string))
+  :type '(string))
 
 
 (defcustom ycmd-local-server-command nil
@@ -193,6 +193,8 @@ Example value:
                               "--keep_logfile"
                               "--idle_suicide_seconds=10800"
                               "--host=0.0.0.0")
+                              ;; "--stdout=/tmp/ycmdstdout"
+                              ;; "--stderr=/tmp/ycmdstderr")
   "Extra arguments to pass to the ycmd server."
   :type '(repeat string))
 
@@ -2374,6 +2376,12 @@ The timeout can be set with the variable
                    (- (float-time) server-start-time))
             (ycmd--on-server-timeout)))))))
 
+(defun ycmd--strip-tramp-path (full-path)
+  (if (file-remote-p full-path)
+      (tramp-file-name-localname
+       (tramp-dissect-file-name full-path))
+    full-path))
+
 (defun ycmd--column-in-bytes ()
   "Calculate column offset in bytes for the current position and buffer."
   (- (position-bytes (point))
@@ -2389,7 +2397,7 @@ The timeout can be set with the variable
   "Build the basic request data alist for a server request."
   (let* ((column-num (+ 1 (ycmd--column-in-bytes)))
          (line-num (line-number-at-pos (point)))
-         (full-path (ycmd--encode-string (or (buffer-file-name) "")))
+         (full-path (ycmd--encode-string (or (ycmd--strip-tramp-path (buffer-file-name)) "")))
          (file-contents (ycmd--encode-string
                          (buffer-substring-no-properties
                           (point-min) (point-max))))
