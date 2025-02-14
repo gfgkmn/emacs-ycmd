@@ -1407,6 +1407,8 @@ SUCCESS-HANDLER is called when for a successful response."
   (declare (indent 1))
   (when ycmd-mode
     (let ((cmd (or (car-safe subcommand) subcommand)))
+      (unless (ycmd--server-alive-p)
+        (ycmd-open))
       (if (ycmd-parsing-in-progress-p)
           (message "Can't send \"%s\" request while parsing is in progress!" cmd)
         (let ((pos (point)))
@@ -2579,7 +2581,8 @@ anything like that)."
          (hmac (ycmd--get-request-hmac type path content))
          (encoded-hmac (base64-encode-string hmac 't))
          (url (format "http://%s:%s%s"
-                      (ycmd-get-host) (ycmd-get-port) path))
+                      ;; (ycmd-get-host) (ycmd-get-port) path))
+                      "127.0.0.1" (ycmd-get-port) path))
          (headers `(("Content-Type" . "application/json")
                     ("X-Ycm-Hmac" . ,encoded-hmac)))
          (parser (lambda ()
