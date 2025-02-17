@@ -2399,7 +2399,10 @@ The timeout can be set with the variable
   "Build the basic request data alist for a server request."
   (let* ((column-num (+ 1 (ycmd--column-in-bytes)))
          (line-num (line-number-at-pos (point)))
-         (full-path (ycmd--encode-string (or (ycmd--strip-tramp-path (buffer-file-name)) "")))
+         (full-path (ycmd--encode-string
+                     (or (when-let ((file-name (buffer-file-name)))
+                           (ycmd--strip-tramp-path file-name))
+                         "")))
          (file-contents (ycmd--encode-string
                          (buffer-substring-no-properties
                           (point-min) (point-max))))
