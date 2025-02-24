@@ -163,10 +163,11 @@ Set this to enable YCMD on specific Wi-Fi networks by adding the network names t
   :type '(repeat string))
 
 (defcustom ycmd-office-wifi-name nil
-  "List of WiFi names considered as office networks.
-When connected to these networks, ycmd server will be started automatically.
-Each element should be a string representing a WiFi network name (SSID).
-For example: '(\"office-wifi\" \"company-network\")"
+  "List of WiFi network names (SSIDs) that are recognized as office networks. When
+connected to these networks, the ycmd server will connect directly to the remote machine
+using its actual IP address. Otherwise, when on other networks, the server will use
+localhost port forwarding and localhost ip instead. Example configuration:
+'(\"office-wifi\" \"company-network\")"
   :type '(string))
 
 
@@ -742,17 +743,9 @@ explicitly re-define the prefix key:
      (setq ,timer nil)))
 
 
-(defun ycmd-set-wifi-name ()
-  "Set current WiFi name using system profiler command."
-  (interactive)
-  (setq ycmd-wifi-name
-        (string-trim
-         (shell-command-to-string
-          "system_profiler SPAirPortDataType | grep -A2 'Status: Connected' | tail -n1 | sed 's/:$//' | awk '{print $NF}'"))))
-
 (defun ycmd-get-host ()
   (let ((wifi-name (or ycmd-wifi-name
-                       (ycmd-set-wifi-name))))
+                       current-wifi-name)))
     (if (string-match-p (concat ".*" ycmd-office-wifi-name ".*") ycmd-wifi-name)
         (gethash (if (stringp (ycmd--get-current-machine))
                      (ycmd--get-current-machine)
@@ -1948,15 +1941,19 @@ cdr is a list of location objects."
     (insert (propertize (concat filepath "\n") 'face 'bold))
     (mapc (lambda (it)
             (let-alist it
-              (when line-num-format
-                (insert (format line-num-format .line_num)))
-              (insert "    ")
               (let ((description (or (and (not (s-blank? .description))
-                                          (s-trim-left .description))
-                                     (ycmd--get-line-from-location it))))
+                                        (s-trim-left .description))
+                                   (ycmd--get-line-from-location it)))
+                    (line-str (when line-num-format
+                               (format line-num-format .line_num))))
+                ;; Create one button for the entire line
                 (ycmd--view-insert-button
-                 (ycmd--fontify-code (or description "") mode) it))
-              (insert "\n")))
+                 (concat
+                  (if line-str line-str "")
+                  "    "
+                  (ycmd--fontify-code (or description "") mode))
+                 it)
+                (insert "\n"))))
           locations)))
 
 (defvar ycmd-view-mode-map
