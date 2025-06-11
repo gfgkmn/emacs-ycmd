@@ -746,7 +746,7 @@ explicitly re-define the prefix key:
 (defun ycmd-get-host ()
   (let ((wifi-name (or ycmd-wifi-name
                        current-wifi-name)))
-    (if (string-match-p (concat ".*" ycmd-office-wifi-name ".*") ycmd-wifi-name)
+    (if (string-match-p (concat ".*" ycmd-office-wifi-name ".*") wifi-name)
         (gethash (if (stringp (ycmd--get-current-machine))
                      (ycmd--get-current-machine)
                    (prin1-to-string (ycmd--get-current-machine)))
@@ -756,7 +756,7 @@ explicitly re-define the prefix key:
 (defun ycmd-get-server-port ()
   (string-to-number (gethash (if (stringp (ycmd--get-current-machine))
                                  (ycmd--get-current-machine)
-                               (prin1-to-string (ycmd--get-current-machine))) ycmd-port-mapping)))
+                               (prin1-to-string (ycmd--get-current-machine))) ycmd-port-mapping "43315")))
 
 (defun ycmd-get-port ()
   (gethash (ycmd--get-current-machine) ycmd--server-actual-port-dict))
@@ -2581,8 +2581,8 @@ anything like that)."
          (hmac (ycmd--get-request-hmac type path content))
          (encoded-hmac (base64-encode-string hmac 't))
          (url (format "http://%s:%s%s"
-                      ;; (ycmd-get-host) (ycmd-get-port) path))
-                      "127.0.0.1" (ycmd-get-port) path))
+                      (ycmd-get-host) (ycmd-get-port) path))
+                      ;; "127.0.0.1" (ycmd-get-port) path))
          (headers `(("Content-Type" . "application/json")
                     ("X-Ycm-Hmac" . ,encoded-hmac)))
          (parser (lambda ()
