@@ -763,15 +763,17 @@ explicitly re-define the prefix key:
 
 (defun ycmd-server-command ()
   "Return the ycmd server command.according local or remote."
-  (if (file-remote-p default-directory)
-      ycmd-remote-server-command
-    ycmd-local-server-command))
+  (let ((machine (ycmd--get-current-machine)))
+    (if (equal machine "local")
+        ycmd-local-server-command
+      ycmd-remote-server-command)))
 
 (defun ycmd-get-python-binary-path ()
   "Get the appropriate Python binary path based on whether we're using Tramp or not."
-  (if (file-remote-p default-directory)
-      (or ycmd-remote-python-binary-path "")
-    (or ycmd-local-python-binary-path "")))
+  (let ((machine (ycmd--get-current-machine)))
+    (if (equal machine "local")
+        (or ycmd-local-python-binary-path "")
+      (or ycmd-remote-python-binary-path ""))))
 
 (defun ycmd-parsing-in-progress-p ()
   "Return t if parsing is in progress."
@@ -1169,11 +1171,33 @@ process with `delete-process'."
 
 
 (defun ycmd--get-current-machine ()
-  "Get current machine identifier from default-directory.
-Returns 'local for local machine, or hostname for remote machines."
-  (if (file-remote-p default-directory)
-      (file-remote-p default-directory 'host)
-    'local))
+  "Get current machine identifier from default-directory or EIN buffer.
+Returns the host key from ycmd-host-mapping.
+For EIN notebooks, extracts host from buffer name.
+For regular files, uses default-directory."
+  (let ((extracted-host
+         (cond
+          ;; Check if we're in an EIN buffer by buffer name pattern
+          ((string-match "^ \\*ein: https?://\\([^:/]+\\)" (buffer-name))
+           (match-string 1 (buffer-name)))
+          ;; Check for remote file
+          ((file-remote-p default-directory)
+           (file-remote-p default-directory 'host))
+          ;; Default to local
+          (t "local"))))
+    ;; (message "Extracted host: %s" extracted-host)
+    ;; First check if extracted-host is already a key in the hash table
+    (cond
+     ((gethash extracted-host ycmd-host-mapping)
+      extracted-host)
+     ;; If not a key, search for it as a value and return the corresponding key
+     (t
+      (let ((found-key nil))
+        (maphash (lambda (key value)
+                   (when (equal value extracted-host)
+                     (setq found-key key)))
+                 ycmd-host-mapping)
+        (or found-key "local"))))))
 
 (defun ycmd--get-server-process-name ()
   "Get ycmd server process name for current machine from dictionary.
@@ -1544,7 +1568,10 @@ LOCATION is a structure as returned from e.g. the various GoTo commands."
     (when .filepath
       (let ((filepath (if (file-remote-p .filepath)
                           .filepath  ; already has TRAMP prefix, use as is
-                        (concat (file-remote-p default-directory) .filepath))))  ; add TRAMP prefix from current buffer
+                        (let ((machine (ycmd--get-current-machine)))
+                          (if (equal machine "local")
+                              .filepath
+                            (concat "/" tramp-default-method ":" machine ":" .filepath))))))
         (funcall find-function filepath)
         (goto-char (ycmd--col-line-to-position
                     .column_num .line_num))))))
@@ -2295,9 +2322,10 @@ the name of the newly created file."
              (string-match "^serving on http://.*:\\\([0-9]+\\\)$"
                            string))
     (ycmd--kill-timer ycmd--server-timeout-timer)
-    (puthash (ycmd--get-current-machine)
-             (string-to-number (match-string 1 string))
-             ycmd--server-actual-port-dict)
+   (let ((machine (process-get process 'ycmd-machine)))  ; Get stored machine
+     (puthash machine
+              (string-to-number (match-string 1 string))
+              ycmd--server-actual-port-dict))
     (ycmd--with-all-ycmd-buffers
       (ycmd--reset-parse-status))
     (ycmd--perform-deferred-parse)))
@@ -2315,6 +2343,32 @@ If `ycmd-bypass-url-proxy-services' is non-nil, prepend
                          (list (concat "NO_PROXY=" "127.0.0.1")))
                     process-environment))))
 
+(defun ycmd--create-remote-options-file (hmac-secret machine)
+  "Create options file on remote MACHINE with HMAC-SECRET."
+  (let* ((remote-temp-dir (format "/%s:%s:/tmp" tramp-default-method machine))
+         (options-file (make-temp-file "ycmd-options" nil nil))
+         (remote-options-file (format "/%s:%s:/tmp/%s"
+                                      tramp-default-method
+                                      machine
+                                      (file-name-nondirectory options-file)))
+         (options (ycmd--options-contents hmac-secret)))
+    ;; Create local temp file first
+    (with-temp-file options-file
+      (insert (ycmd--json-encode options)))
+    ;; Copy to remote machine
+    (copy-file options-file remote-options-file t)
+    ;; Delete local temp file
+    (delete-file options-file)
+    ;; Return remote path without TRAMP prefix for the server command
+    (format "/tmp/%s" (file-name-nondirectory remote-options-file))))
+
+(defun ycmd--start-remote-process (machine proc-buff server-program+args)
+  "Start ycmd server process on remote MACHINE."
+  (let* ((default-directory (format "/%s:%s:~/" tramp-default-method machine))
+         (process-name (ycmd--get-server-process-name)))
+    (apply #'start-file-process process-name proc-buff server-program+args)))
+
+
 (defun ycmd--start-server ()
   "Start a new server and return the process."
   (unless (ycmd-server-command)
@@ -2331,14 +2385,20 @@ See the docstring of the variable for an example"))
                       (> (ycmd-get-server-port) 0)
                       (ycmd-get-server-port)))
            (hmac-secret (ycmd--generate-hmac-secret))
-           (options-file (ycmd--create-options-file hmac-secret))
+           (machine (ycmd--get-current-machine))
+           (is-remote (not (equal machine "local")))
+           (options-file (if is-remote
+                             (ycmd--create-remote-options-file hmac-secret machine)
+                           (ycmd--create-options-file hmac-secret)))
            (args (append (and port (list (format "--port=%d" port)))
                          (list (concat "--options_file=" options-file))
                          ycmd-server-args))
            (server-program+args (append (ycmd-server-command) args))
            (process-environment (ycmd--get-process-environment))
-           (proc (apply #'start-file-process (ycmd--get-server-process-name) proc-buff
-                        server-program+args)))
+           (proc (if is-remote
+                     (ycmd--start-remote-process machine proc-buff server-program+args)
+                   (apply #'start-file-process (ycmd--get-server-process-name) proc-buff
+                          server-program+args))))
       (prin1 proc)
       (message "Starting ycmd server with command: %s" server-program+args)
       (ycmd--with-all-ycmd-buffers
@@ -2349,6 +2409,7 @@ See the docstring of the variable for an example"))
       (puthash (ycmd--get-current-machine)
                nil
                ycmd--server-actual-port-dict)
+      (process-put proc 'ycmd-machine machine)
       (set-process-query-on-exit-flag proc nil)
       (set-process-sentinel proc #'ycmd--server-process-sentinel)
       (set-process-filter proc #'ycmd--server-process-filter)
@@ -2392,17 +2453,100 @@ The timeout can be set with the variable
       (defun ycmd--encode-string (s) s)
     (defun ycmd--encode-string (s) (encode-coding-string s 'utf-8))))
 
+(defun ycmd--get-notebook-cell-content-and-position ()
+  "Get merged content of all Python cells and current position in virtual file.
+Returns (virtual-file-content . (line . column)) or nil if not in notebook."
+  (when (and (boundp 'ein:notebook-mode) ein:notebook-mode)
+    (condition-case nil
+        (save-excursion  ; Preserve cursor position
+          (let ((current-cell (ein:get-cell-at-point))
+                (current-pos original-pos))  ; Use the originally captured position
+            (when current-cell
+              (let* ((notebook (ein:get-notebook))
+                     (cells (ein:notebook-get-cells notebook))
+                     (virtual-content "")
+                     (virtual-line 1)
+                     (virtual-col 1)
+                     (current-cell-found nil))
+
+                ;; Process each cell
+                (dolist (cell cells)
+                  (when (and cell
+                             (or (string= (ein:cell-get-cell-type cell) "code")
+                                 (eq (ein:cell-get-cell-type cell) 'code)))
+                    (let* ((cell-content (ein:cell-get-text cell))
+                           (cell-content-clean (if (string-suffix-p "\n" cell-content)
+                                                   cell-content
+                                                 (concat cell-content "\n"))))
+
+                      ;; Check if this is the current cell where cursor is
+                      (if (eq cell current-cell)
+                          (let* ((cell-start (ein:cell-input-pos-min cell))
+                                 (cell-relative-pos (- current-pos cell-start))
+                                 (content-before-cursor (substring cell-content 0
+                                                                   (min cell-relative-pos
+                                                                        (length cell-content))))
+                                 (lines-before (split-string content-before-cursor "\n" t))
+                                 (lines-count (length lines-before)))
+
+                            (setq current-cell-found t)
+                            (if (> lines-count 0)
+                                (progn
+                                  (setq virtual-line (+ virtual-line lines-count -1))
+                                  (setq virtual-col (1+ (length (car (last lines-before))))))
+                              (setq virtual-col 1)))
+
+                        ;; Not the current cell - just count lines if we haven't found current cell yet
+                        (unless current-cell-found
+                          (let ((cell-lines (split-string cell-content-clean "\n")))
+                            (setq virtual-line (+ virtual-line (length cell-lines))))))
+
+                      ;; Add this cell's content to virtual file
+                      (setq virtual-content (concat virtual-content cell-content-clean "\n")))))
+
+                ;; Return result if we found the current cell
+                (when current-cell-found
+                  (cons virtual-content (cons virtual-line virtual-col)))))))
+      (error nil))))
+
+(defun ycmd--get-notebook-file-path ()
+   "Get notebook file path if in ein mode."
+   (when (and (boundp 'ein:notebook-mode) ein:notebook-mode)
+     (condition-case nil
+         (let ((notebook (ein:get-notebook)))
+           (when notebook
+            (let* ((path (ein:$notebook-notebook-path notebook))
+                   (url-or-port (ein:$notebook-url-or-port notebook)))
+               (if path
+                  (if (string-match "^https?://\\([^:/]+\\)\\(?::\\([0-9]+\\)\\)?" url-or-port)
+                      ;; Remote notebook - use absolute path on remote server
+                      (concat "/tmp/" path)
+                    ;; Local notebook
+                    (expand-file-name path))
+                 (buffer-file-name)))))
+       (error (buffer-file-name)))))
+
+
 (defun ycmd--get-basic-request-data ()
   "Build the basic request data alist for a server request."
-  (let* ((column-num (+ 1 (ycmd--column-in-bytes)))
-         (line-num (line-number-at-pos (point)))
+  (let* ((notebook-data (ycmd--get-notebook-cell-content-and-position))
+         (column-num (if notebook-data
+                         (cddr notebook-data)
+                       (+ 1 (ycmd--column-in-bytes))))
+         (line-num (if notebook-data
+                       (cadr notebook-data)
+                     (line-number-at-pos (point))))
          (full-path (ycmd--encode-string
                      (or (when-let ((file-name (buffer-file-name)))
                            (ycmd--strip-tramp-path file-name))
+                         (when-let ((nb-path (ycmd--get-notebook-file-path)))
+                           (ycmd--strip-tramp-path nb-path))
                          "")))
          (file-contents (ycmd--encode-string
-                         (buffer-substring-no-properties
-                          (point-min) (point-max))))
+                         (if notebook-data
+                             (car notebook-data)
+                           (buffer-substring-no-properties
+                            (point-min) (point-max)))))
          (file-types (or (ycmd-major-mode-to-file-types major-mode)
                          '("generic"))))
     `(("file_data" .
