@@ -1566,15 +1566,28 @@ Useful in case compile-time is considerable."
 LOCATION is a structure as returned from e.g. the various GoTo commands."
   (let-alist location
     (when .filepath
-      (let ((filepath (if (file-remote-p .filepath)
-                          .filepath  ; already has TRAMP prefix, use as is
-                        (let ((machine (ycmd--get-current-machine)))
-                          (if (equal machine "local")
-                              .filepath
-                            (concat "/" tramp-default-method ":" machine ":" .filepath))))))
-        (funcall find-function filepath)
-        (goto-char (ycmd--col-line-to-position
-                    .column_num .line_num))))))
+      (let* ((filepath .filepath)
+             (target-buffer
+              (cond
+               ;; Handle EIN notebook buffers - just use current buffer
+               ((string-suffix-p ".ipynb" filepath)
+                (current-buffer))
+               ;; Handle regular files
+               (t
+                (let ((full-filepath
+                       (if (file-remote-p filepath)
+                           filepath  ; already has TRAMP prefix, use as is
+                         (let ((machine (ycmd--get-current-machine)))
+                           (if (equal machine "local")
+                               filepath
+                             (concat "/" tramp-default-method ":" machine ":" filepath))))))
+                  (funcall find-function full-filepath)
+                  (current-buffer))))))
+
+        (when target-buffer
+          (switch-to-buffer target-buffer)
+          (goto-char (ycmd--col-line-to-position
+                      .column_num .line_num)))))))
 
 (defun ycmd--goto-line (line)
   "Go to LINE."
