@@ -171,24 +171,11 @@ localhost port forwarding and localhost ip instead. Example configuration:
   :type '(string))
 
 
-(defcustom ycmd-local-server-command nil
-  "The ycmd server program command.
+(defcustom ycmd-python-path-mapping (make-hash-table :test 'equal)
+  "Mapping of host names to their actual python path for ycmd server connection.")
 
-The value is a list of arguments to run the ycmd server.
-Example value:
-
-\(set-variable 'ycmd-server-command (\"python\" \"/path/to/ycmd/package/\"))"
-  :type '(repeat string))
-
-
-(defcustom ycmd-remote-server-command nil
-  "The ycmd server program command.
-
-The value is a list of arguments to run the ycmd server.
-Example value:
-
-\(set-variable 'ycmd-server-command (\"python\" \"/path/to/ycmd/package/\"))"
-  :type '(repeat string))
+(defcustom ycmd-server-command-mapping (make-hash-table :test 'equal)
+  "Mapping of host names to their actual server-command for ycmd server connection.")
 
 (defcustom ycmd-server-args '("--log=debug"
                               "--keep_logfile"
@@ -387,15 +374,7 @@ engine."
   "Racerd binary path."
   :type 'string)
 
-(defcustom ycmd-local-python-binary-path nil
-  "Python binary path."
-  :type 'string)
-
 (defcustom ycmd-current-machine nil
-  "Python binary path."
-  :type 'string)
-
-(defcustom ycmd-remote-python-binary-path nil
   "Python binary path."
   :type 'string)
 
@@ -763,17 +742,11 @@ explicitly re-define the prefix key:
 
 (defun ycmd-server-command ()
   "Return the ycmd server command.according local or remote."
-  (let ((machine (ycmd--get-current-machine)))
-    (if (equal machine "local")
-        ycmd-local-server-command
-      ycmd-remote-server-command)))
+  (gethash (ycmd--get-current-machine) ycmd-server-command-mapping))
 
 (defun ycmd-get-python-binary-path ()
   "Get the appropriate Python binary path based on whether we're using Tramp or not."
-  (let ((machine (ycmd--get-current-machine)))
-    (if (equal machine "local")
-        (or ycmd-local-python-binary-path "")
-      (or ycmd-remote-python-binary-path ""))))
+  (gethash (ycmd--get-current-machine) ycmd-python-path-mapping))
 
 (defun ycmd-parsing-in-progress-p ()
   "Return t if parsing is in progress."
