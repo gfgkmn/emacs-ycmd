@@ -680,6 +680,16 @@ explicitly re-define the prefix key:
     map)
   "Keymap for `ycmd-mode'.")
 
+
+(defvar ycmd-custom-language-server '()
+  "Custom language servers to be added to ycmd options.
+
+Each element should be an alist with the following keys:
+- `name`: A string naming the language server.
+- `filetypes`: A vector of filetype strings handled by the server.
+- `cmdline`: A vector of strings for the command line to start the server.")
+
+
 (easy-menu-define ycmd-mode-menu ycmd-mode-map
   "Menu used when `ycmd-mode' is active."
   '("YCMd"
@@ -1465,6 +1475,11 @@ This is a blocking request."
               (t
                (ycmd--handle-goto-response response)))))))
 
+(defun ycmd-get-hover ()
+  "Get hover information for the symbol at the current position."
+  (interactive)
+  (ycmd-completer "GetHover"))
+
 (defun ycmd-goto ()
   "Go to the definition or declaration of the symbol at current position."
   (interactive)
@@ -2217,7 +2232,8 @@ file."
         (swift-src-path (or ycmd-swift-src-path ""))
         (racerd-binary-path (or ycmd-racerd-binary-path ""))
         (python-binary-path (ycmd-get-python-binary-path))
-        (auto-trigger (if ycmd-auto-trigger-semantic-completion 1 0)))
+        (auto-trigger (if ycmd-auto-trigger-semantic-completion 1 0))
+        (language-server ycmd-custom-language-server))
     `((filepath_completion_use_working_dir . 0)
       (auto_trigger . ,auto-trigger)
       (min_num_of_chars_for_completion . ,ycmd-min-num-chars-for-completion)
@@ -2344,7 +2360,7 @@ If `ycmd-bypass-url-proxy-services' is non-nil, prepend
     ;; Copy to remote machine
     (copy-file options-file remote-options-file t)
     ;; Delete local temp file
-    (delete-file options-file)
+    ;; (delete-file options-file)
     ;; Return remote path without TRAMP prefix for the server command
     (format "/tmp/%s" (file-name-nondirectory remote-options-file))))
 
