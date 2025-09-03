@@ -2257,7 +2257,8 @@ file."
       (rust_src_path . ,rust-src-path)
       (swift_src_path . ,swift-src-path)
       (racerd_binary_path . ,racerd-binary-path)
-      (python_binary_path . ,python-binary-path))))
+      (python_binary_path . ,python-binary-path)
+      (language_server . ,language-server))))
 
 (defun ycmd--create-options-file (hmac-secret)
   "Create a new options file for a ycmd server with HMAC-SECRET.
