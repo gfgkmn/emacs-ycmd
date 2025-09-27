@@ -2458,9 +2458,20 @@ The timeout can be set with the variable
       (defun ycmd--encode-string (s) s)
     (defun ycmd--encode-string (s) (encode-coding-string s 'utf-8))))
 
+(defun ycmd--get-notebook-virtual-content ()
+  "Get the virtual content for a notebook buffer.
+Currently returns the entire buffer content, but this is abstracted
+to allow for future improvements like extracting only Python cells."
+  (buffer-substring-no-properties (point-min) (point-max)))
+
+;; NOTE: This function is kept for compatibility but always returns nil.
+;; Notebook support now works by creating a temp copy of the .ipynb file
+;; and using diff mode like regular files, rather than trying to extract
+;; and merge Python cells.
 (defun ycmd--get-notebook-cell-content-and-position ()
   "Get merged content of all Python cells and current position in virtual file.
-Returns (virtual-file-content . (line . column)) or nil if not in notebook."
+Returns (virtual-file-content . (line . column)) or nil if not in notebook.
+NOTE: This function always returns nil and is kept for compatibility only."
   (when (and (boundp 'ein:notebook-mode) ein:notebook-mode)
     (condition-case nil
         (save-excursion  ; Preserve cursor position
@@ -2536,7 +2547,7 @@ Returns (virtual-file-content . (line . column)) or nil if not in notebook."
   "Controls how file contents are sent to the server.
 Possible values:
   'always - Always send full file contents
-  'smart - Send minimal data: diff for modified files, nothing for saved files
+  'smart - Send diff for modified files, nothing for saved files
   'never - Never send contents (server must read from disk)")
 
 (defvar-local ycmd--notebook-base-file nil
@@ -2549,30 +2560,31 @@ Possible values:
   "Whether the notebook base file has been initialized with the server.")
 
 (defun ycmd--ensure-notebook-base-file ()
-  "Ensure notebook has a base Python file in temp directory.
-Returns the path to the base file."
+  "Ensure notebook has a base file in temp directory.
+Returns the path to the base file. For notebooks, creates a copy of the .ipynb file."
   ;; Check if we already have a valid base file
   (if (and ycmd--notebook-base-file
            (file-exists-p ycmd--notebook-base-file))
       ycmd--notebook-base-file
     ;; Create base file from current notebook state
-    (when (and (boundp 'ein:notebook-mode) ein:notebook-mode)
-      (let* ((notebook-data (ycmd--get-notebook-cell-content-and-position))
-             (python-content (car notebook-data))
-             ;; Generate a meaningful name based on notebook name if available
-             (notebook-name (ignore-errors
-                              (file-name-base
-                          (or (buffer-file-name)
-                              (buffer-name)))))
-             (temp-file (make-temp-file
-                         (format "ycmd-nb-%s-" (or notebook-name "untitled"))
-                         nil ".py")))
-        ;; Write the file to disk
-        (with-temp-file temp-file
-          (insert python-content))
-        ;; Save the file path and content for diff generation
-        (setq ycmd--notebook-base-file temp-file)
-        (setq ycmd--notebook-base-content python-content)
+    (let* ((is-notebook (or (and (boundp 'ein:notebook-mode) ein:notebook-mode)
+                           (and (buffer-file-name)
+                                (string-suffix-p ".ipynb" (buffer-file-name)))))
+           (notebook-name (ignore-errors
+                           (file-name-base
+                            (or (buffer-file-name)
+                                (buffer-name)))))
+           (temp-file (make-temp-file
+                       (format "ycmd-nb-%s-" (or notebook-name "untitled"))
+                       nil ".ipynb")))
+      (when is-notebook
+        ;; Write the current buffer contents to temp file
+        (let ((content (ycmd--get-notebook-virtual-content)))
+          (with-temp-file temp-file
+            (insert content))
+          ;; Save the file path and content for diff generation
+          (setq ycmd--notebook-base-file temp-file)
+          (setq ycmd--notebook-base-content content))
         (setq ycmd--notebook-base-initialized nil)
         ycmd--notebook-base-file))))
 
@@ -2583,12 +2595,16 @@ Returns the path to the base file."
   "Update the notebook base file with current content after save."
   (when (and ycmd--notebook-base-file
              (file-exists-p ycmd--notebook-base-file))
-    (let* ((notebook-data (ycmd--get-notebook-cell-content-and-position))
-           (python-content (if notebook-data (car notebook-data) "")))
+    (let ((current-content (if (or (and (boundp 'ein:notebook-mode) ein:notebook-mode)
+                                   (and (buffer-file-name)
+                                        (string-suffix-p ".ipynb" (buffer-file-name))))
+                               (ycmd--get-notebook-virtual-content)
+                             (buffer-substring-no-properties
+                              (point-min) (point-max)))))
       ;; Update the local file and cached content
       (with-temp-file ycmd--notebook-base-file
-        (insert python-content))
-      (setq ycmd--notebook-base-content python-content)
+        (insert current-content))
+      (setq ycmd--notebook-base-content current-content)
       ;; Set flag to update server's base file on next request
       (setq ycmd--notebook-needs-base-update t))))
 
@@ -2648,37 +2664,19 @@ FILE-PATH can be a TRAMP path; we'll get the local cache."
 
 (defun ycmd--get-basic-request-data ()
   "Build the basic request data alist for a server request."
-  (let* ((notebook-data (ycmd--get-notebook-cell-content-and-position))
-         (column-num (if notebook-data
-                         (cddr notebook-data)
-                       (+ 1 (ycmd--column-in-bytes))))
-         (line-num (if notebook-data
-                       (cadr notebook-data)
-                     (line-number-at-pos (point))))
-         ;; For notebooks, use the base Python file path, not the .ipynb path
+  (let* ((is-notebook (or (and (boundp 'ein:notebook-mode) ein:notebook-mode)
+                          (and (buffer-file-name)
+                               (string-suffix-p ".ipynb" (buffer-file-name)))))
+         (column-num (+ 1 (ycmd--column-in-bytes)))
+         (line-num (line-number-at-pos (point)))
+         ;; For notebooks, use the temp base file path, for regular files use the actual path
          (full-path (ycmd--encode-string
                      (cond
-                      ;; For notebooks, use the base Python file that actually exists
-                      (notebook-data
+                      ;; For notebooks, use the base file path (temp copy)
+                      (is-notebook
                        (or ycmd--notebook-base-file
                            (ycmd--ensure-notebook-base-file)
-                           ;; If still nil, force create it here
-                           (progn
-                             (let* ((python-content (car notebook-data))
-                                    (notebook-name (ignore-errors
-                                                   (file-name-base
-                                                    (or (ycmd--get-notebook-file-path)
-                                                        (buffer-name)))))
-                                    (temp-file (make-temp-file
-                                              (format "ycmd-nb-%s-"
-                                                     (or notebook-name "untitled"))
-                                              nil ".py")))
-                               (with-temp-file temp-file
-                                 (insert python-content))
-                               (setq ycmd--notebook-base-file temp-file)
-                               (setq ycmd--notebook-base-content python-content)
-                               (setq ycmd--notebook-base-initialized nil)
-                               temp-file))))
+                           ""))
                       ;; For regular files
                       ((buffer-file-name)
                        (ycmd--strip-tramp-path (buffer-file-name)))
@@ -2695,10 +2693,10 @@ FILE-PATH can be a TRAMP path; we'll get the local cache."
             ('smart
              ;; Send minimal data: diff for modified files
              (cond
-              ;; Notebook handling
-              (notebook-data
+              ;; Notebook handling - create ipynb copy like in 'always' mode
+              (is-notebook
                (let* ((base-file (ycmd--ensure-notebook-base-file))
-                      (current-content (car notebook-data)))
+                      (current-content (ycmd--get-notebook-virtual-content)))
                  (cond
                   ;; First time - send full contents to initialize server
                   ((not ycmd--notebook-base-initialized)
@@ -2760,46 +2758,11 @@ FILE-PATH can be a TRAMP path; we'll get the local cache."
               ;; Unmodified file - server reads from disk
               (t
                `((filetypes . ,file-types)))))
-            ('diff
-             ;; Always try to send diff
-             (cond
-              (notebook-data
-               (let* ((base-file (ycmd--ensure-notebook-base-file))
-                      (current-content (car notebook-data)))
-                 (if (not ycmd--notebook-base-initialized)
-                     ;; First time - must send full contents
-                     (progn
-                       (setq ycmd--notebook-base-initialized t)
-                       (setq ycmd--notebook-base-content current-content)
-                       (with-temp-file base-file
-                         (insert current-content))
-                       `((contents . ,(ycmd--encode-string current-content))
-                         (filetypes . ,file-types)
-                         (create_if_needed . t)))
-                   ;; Generate diff from base file
-                   (let ((diff (ycmd--generate-diff-from-file
-                               base-file current-content)))
-                     `((diff . ,(ycmd--encode-string diff))
-                       (filetypes . ,file-types))))))
-              ((and (buffer-file-name) (file-exists-p (buffer-file-name)))
-               (let ((diff (ycmd--generate-diff-from-file
-                           (buffer-file-name)
-                           (buffer-substring-no-properties
-                            (point-min) (point-max)))))
-                 `((diff . ,(ycmd--encode-string diff))
-                   (filetypes . ,file-types))))
-              (t
-               `((contents . ,(ycmd--encode-string
-                              (buffer-substring-no-properties
-                               (point-min) (point-max))))
-                 (filetypes . ,file-types)))))
             (_
              ;; Default: always send full contents
              `((contents . ,(ycmd--encode-string
-                            (if notebook-data
-                                (car notebook-data)
-                              (buffer-substring-no-properties
-                               (point-min) (point-max)))))
+                            (buffer-substring-no-properties
+                             (point-min) (point-max))))
                (filetypes . ,file-types))))))
     `((file_data .
        ((,full-path . ,file-data-content)))
@@ -2816,13 +2779,18 @@ FILE-PATH can be a TRAMP path; we'll get the local cache."
 (add-hook 'ycmd-mode-hook
           (lambda ()
             ;; Ensure base file exists when enabling ycmd-mode in a notebook
-            (when (and (boundp 'ein:notebook-mode) ein:notebook-mode)
+            (when (or (and (boundp 'ein:notebook-mode) ein:notebook-mode)
+                     (and (buffer-file-name)
+                          (string-suffix-p ".ipynb" (buffer-file-name))))
               (ycmd--ensure-notebook-base-file))))
 
 (add-hook 'after-save-hook
           (lambda ()
             ;; Update notebook base file after saving
-            (when (and (boundp 'ein:notebook-mode) ein:notebook-mode)
+            (when (and ycmd-mode
+                       (or (and (boundp 'ein:notebook-mode) ein:notebook-mode)
+                          (and (buffer-file-name)
+                               (string-suffix-p ".ipynb" (buffer-file-name)))))
               (ycmd--update-notebook-base-file))))
 
 
