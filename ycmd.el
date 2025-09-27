@@ -2458,72 +2458,25 @@ The timeout can be set with the variable
       (defun ycmd--encode-string (s) s)
     (defun ycmd--encode-string (s) (encode-coding-string s 'utf-8))))
 
+(defun ycmd--is-notebook-buffer ()
+  "Check if current buffer is a notebook (EIN or .ipynb file)."
+  (or (and (boundp 'ein:notebook-mode) ein:notebook-mode)
+      (and (buffer-file-name)
+           (string-suffix-p ".ipynb" (buffer-file-name)))))
+
 (defun ycmd--get-notebook-virtual-content ()
   "Get the virtual content for a notebook buffer.
 Currently returns the entire buffer content, but this is abstracted
 to allow for future improvements like extracting only Python cells."
   (buffer-substring-no-properties (point-min) (point-max)))
 
-;; NOTE: This function is kept for compatibility but always returns nil.
+;; NOTE: This function is deprecated and always returns nil.
 ;; Notebook support now works by creating a temp copy of the .ipynb file
-;; and using diff mode like regular files, rather than trying to extract
-;; and merge Python cells.
+;; and using diff mode like regular files.
 (defun ycmd--get-notebook-cell-content-and-position ()
-  "Get merged content of all Python cells and current position in virtual file.
-Returns (virtual-file-content . (line . column)) or nil if not in notebook.
-NOTE: This function always returns nil and is kept for compatibility only."
-  (when (and (boundp 'ein:notebook-mode) ein:notebook-mode)
-    (condition-case nil
-        (save-excursion  ; Preserve cursor position
-          (let ((current-cell (ein:get-cell-at-point))
-                (current-pos original-pos))  ; Use the originally captured position
-            (when current-cell
-              (let* ((notebook (ein:get-notebook))
-                     (cells (ein:notebook-get-cells notebook))
-                     (virtual-content "")
-                     (virtual-line 1)
-                     (virtual-col 1)
-                     (current-cell-found nil))
-
-                ;; Process each cell
-                (dolist (cell cells)
-                  (when (and cell
-                             (or (string= (ein:cell-get-cell-type cell) "code")
-                                 (eq (ein:cell-get-cell-type cell) 'code)))
-                    (let* ((cell-content (ein:cell-get-text cell))
-                           (cell-content-clean (if (string-suffix-p "\n" cell-content)
-                                                   cell-content
-                                                 (concat cell-content "\n"))))
-
-                      ;; Check if this is the current cell where cursor is
-                      (if (eq cell current-cell)
-                          (let* ((cell-start (ein:cell-input-pos-min cell))
-                                 (cell-relative-pos (- current-pos cell-start))
-                                 (content-before-cursor (substring cell-content 0
-                                                                   (min cell-relative-pos
-                                                                        (length cell-content))))
-                                 (lines-before (split-string content-before-cursor "\n" t))
-                                 (lines-count (length lines-before)))
-
-                            (setq current-cell-found t)
-                            (if (> lines-count 0)
-                                (progn
-                                  (setq virtual-line (+ virtual-line lines-count -1))
-                                  (setq virtual-col (1+ (length (car (last lines-before))))))
-                              (setq virtual-col 1)))
-
-                        ;; Not the current cell - just count lines if we haven't found current cell yet
-                        (unless current-cell-found
-                          (let ((cell-lines (split-string cell-content-clean "\n")))
-                            (setq virtual-line (+ virtual-line (length cell-lines))))))
-
-                      ;; Add this cell's content to virtual file
-                      (setq virtual-content (concat virtual-content cell-content-clean "\n")))))
-
-                ;; Return result if we found the current cell
-                (when current-cell-found
-                  (cons virtual-content (cons virtual-line virtual-col)))))))
-      (error nil))))
+  "Deprecated function - always returns nil.
+Kept for compatibility. Notebook support now uses temp .ipynb copies."
+  nil)
 
 (defun ycmd--get-notebook-file-path ()
    "Get notebook file path if in ein mode."
@@ -2567,9 +2520,7 @@ Returns the path to the base file. For notebooks, creates a copy of the .ipynb f
            (file-exists-p ycmd--notebook-base-file))
       ycmd--notebook-base-file
     ;; Create base file from current notebook state
-    (let* ((is-notebook (or (and (boundp 'ein:notebook-mode) ein:notebook-mode)
-                           (and (buffer-file-name)
-                                (string-suffix-p ".ipynb" (buffer-file-name)))))
+    (let* ((is-notebook (ycmd--is-notebook-buffer))
            (notebook-name (ignore-errors
                            (file-name-base
                             (or (buffer-file-name)
@@ -2595,9 +2546,7 @@ Returns the path to the base file. For notebooks, creates a copy of the .ipynb f
   "Update the notebook base file with current content after save."
   (when (and ycmd--notebook-base-file
              (file-exists-p ycmd--notebook-base-file))
-    (let ((current-content (if (or (and (boundp 'ein:notebook-mode) ein:notebook-mode)
-                                   (and (buffer-file-name)
-                                        (string-suffix-p ".ipynb" (buffer-file-name))))
+    (let ((current-content (if (ycmd--is-notebook-buffer)
                                (ycmd--get-notebook-virtual-content)
                              (buffer-substring-no-properties
                               (point-min) (point-max)))))
@@ -2664,9 +2613,7 @@ FILE-PATH can be a TRAMP path; we'll get the local cache."
 
 (defun ycmd--get-basic-request-data ()
   "Build the basic request data alist for a server request."
-  (let* ((is-notebook (or (and (boundp 'ein:notebook-mode) ein:notebook-mode)
-                          (and (buffer-file-name)
-                               (string-suffix-p ".ipynb" (buffer-file-name)))))
+  (let* ((is-notebook (ycmd--is-notebook-buffer))
          (column-num (+ 1 (ycmd--column-in-bytes)))
          (line-num (line-number-at-pos (point)))
          ;; For notebooks, use the temp base file path, for regular files use the actual path
@@ -2779,18 +2726,13 @@ FILE-PATH can be a TRAMP path; we'll get the local cache."
 (add-hook 'ycmd-mode-hook
           (lambda ()
             ;; Ensure base file exists when enabling ycmd-mode in a notebook
-            (when (or (and (boundp 'ein:notebook-mode) ein:notebook-mode)
-                     (and (buffer-file-name)
-                          (string-suffix-p ".ipynb" (buffer-file-name))))
+            (when (ycmd--is-notebook-buffer)
               (ycmd--ensure-notebook-base-file))))
 
 (add-hook 'after-save-hook
           (lambda ()
             ;; Update notebook base file after saving
-            (when (and ycmd-mode
-                       (or (and (boundp 'ein:notebook-mode) ein:notebook-mode)
-                          (and (buffer-file-name)
-                               (string-suffix-p ".ipynb" (buffer-file-name)))))
+            (when (and ycmd-mode (ycmd--is-notebook-buffer))
               (ycmd--update-notebook-base-file))))
 
 
