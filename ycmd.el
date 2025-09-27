@@ -1170,6 +1170,8 @@ For regular files, uses default-directory."
           (t "local"))))
     ;; (message "Extracted host: %s" extracted-host)
     ;; First check if extracted-host is already a key in the hash table
+    (when (equal extracted-host "127.0.0.1")
+      (setq extracted-host "local"))
     (cond
      ((gethash extracted-host ycmd-host-mapping)
       extracted-host)
@@ -2530,6 +2532,120 @@ Returns (virtual-file-content . (line . column)) or nil if not in notebook."
        (error (buffer-file-name)))))
 
 
+(defvar ycmd-send-file-contents-mode 'smart
+  "Controls how file contents are sent to the server.
+Possible values:
+  'always - Always send full file contents
+  'smart - Send minimal data: diff for modified files, nothing for saved files
+  'never - Never send contents (server must read from disk)")
+
+(defvar-local ycmd--notebook-base-file nil
+  "Path to temp file containing notebook's base Python content.")
+
+(defvar-local ycmd--notebook-base-content nil
+  "Last saved content of the notebook base file.")
+
+(defvar-local ycmd--notebook-base-initialized nil
+  "Whether the notebook base file has been initialized with the server.")
+
+(defun ycmd--ensure-notebook-base-file ()
+  "Ensure notebook has a base Python file in temp directory.
+Returns the path to the base file."
+  ;; Check if we already have a valid base file
+  (if (and ycmd--notebook-base-file
+           (file-exists-p ycmd--notebook-base-file))
+      ycmd--notebook-base-file
+    ;; Create base file from current notebook state
+    (when (and (boundp 'ein:notebook-mode) ein:notebook-mode)
+      (let* ((notebook-data (ycmd--get-notebook-cell-content-and-position))
+             (python-content (car notebook-data))
+             ;; Generate a meaningful name based on notebook name if available
+             (notebook-name (ignore-errors
+                              (file-name-base
+                          (or (buffer-file-name)
+                              (buffer-name)))))
+             (temp-file (make-temp-file
+                         (format "ycmd-nb-%s-" (or notebook-name "untitled"))
+                         nil ".py")))
+        ;; Write the file to disk
+        (with-temp-file temp-file
+          (insert python-content))
+        ;; Save the file path and content for diff generation
+        (setq ycmd--notebook-base-file temp-file)
+        (setq ycmd--notebook-base-content python-content)
+        (setq ycmd--notebook-base-initialized nil)
+        ycmd--notebook-base-file))))
+
+(defvar-local ycmd--notebook-needs-base-update nil
+  "Flag indicating the base file should be updated on next request.")
+
+(defun ycmd--update-notebook-base-file ()
+  "Update the notebook base file with current content after save."
+  (when (and ycmd--notebook-base-file
+             (file-exists-p ycmd--notebook-base-file))
+    (let* ((notebook-data (ycmd--get-notebook-cell-content-and-position))
+           (python-content (if notebook-data (car notebook-data) "")))
+      ;; Update the local file and cached content
+      (with-temp-file ycmd--notebook-base-file
+        (insert python-content))
+      (setq ycmd--notebook-base-content python-content)
+      ;; Set flag to update server's base file on next request
+      (setq ycmd--notebook-needs-base-update t))))
+
+(defun ycmd--get-file-content-for-diff ()
+  "Get file content from disk for diff generation.
+For TRAMP files, this reads from the local cache.
+For regular files, reads directly from disk."
+  (when (buffer-file-name)
+    (with-temp-buffer
+      (insert-file-contents (buffer-file-name))
+      (buffer-string))))
+
+(defun ycmd--get-local-file-path (file-path)
+  "Get local file path for FILE-PATH.
+For TRAMP files, returns the local cache copy.
+For regular files, returns the file path as-is."
+  (if (file-remote-p file-path)
+      ;; For TRAMP files, get the local copy
+      ;; file-local-copy creates a temp copy if needed and returns its path
+      (or (file-local-copy file-path)
+          ;; If file-local-copy fails, try to read content and create temp file
+          (let ((temp-file (make-temp-file "ycmd-tramp-")))
+            (with-temp-buffer
+              (insert-file-contents file-path)
+              (write-region (point-min) (point-max) temp-file nil 'silent))
+            temp-file))
+    ;; For local files, just return the path
+    file-path))
+
+(defun ycmd--generate-diff-from-file (file-path current-content)
+  "Generate unified diff between FILE-PATH and CURRENT-CONTENT.
+FILE-PATH can be a TRAMP path; we'll get the local cache."
+  (let* ((local-file-path (ycmd--get-local-file-path file-path))
+         (temp-file (make-temp-file "ycmd-current-"))
+         diff-output
+         cleanup-local-copy)
+    ;; Check if we created a temp copy for TRAMP
+    (when (and (file-remote-p file-path)
+               (not (equal local-file-path file-path)))
+      (setq cleanup-local-copy t))
+    (unwind-protect
+        (progn
+          (with-temp-file temp-file
+            (insert current-content))
+          (with-temp-buffer
+            (call-process "diff" nil t nil
+                          "-u" "--strip-trailing-cr"
+                          local-file-path temp-file)
+            (setq diff-output (buffer-string))))
+      ;; Clean up temp files
+      (delete-file temp-file)
+      ;; Only delete the local copy if we created it
+      (when (and cleanup-local-copy
+                 (file-exists-p local-file-path))
+        (delete-file local-file-path)))
+    diff-output))
+
 (defun ycmd--get-basic-request-data ()
   "Build the basic request data alist for a server request."
   (let* ((notebook-data (ycmd--get-notebook-cell-content-and-position))
@@ -2539,25 +2655,175 @@ Returns (virtual-file-content . (line . column)) or nil if not in notebook."
          (line-num (if notebook-data
                        (cadr notebook-data)
                      (line-number-at-pos (point))))
+         ;; For notebooks, use the base Python file path, not the .ipynb path
          (full-path (ycmd--encode-string
-                     (or (when-let ((file-name (buffer-file-name)))
-                           (ycmd--strip-tramp-path file-name))
-                         (when-let ((nb-path (ycmd--get-notebook-file-path)))
-                           (ycmd--strip-tramp-path nb-path))
-                         "")))
-         (file-contents (ycmd--encode-string
-                         (if notebook-data
-                             (car notebook-data)
+                     (cond
+                      ;; For notebooks, use the base Python file that actually exists
+                      (notebook-data
+                       (or ycmd--notebook-base-file
+                           (ycmd--ensure-notebook-base-file)
+                           ;; If still nil, force create it here
+                           (progn
+                             (let* ((python-content (car notebook-data))
+                                    (notebook-name (ignore-errors
+                                                   (file-name-base
+                                                    (or (ycmd--get-notebook-file-path)
+                                                        (buffer-name)))))
+                                    (temp-file (make-temp-file
+                                              (format "ycmd-nb-%s-"
+                                                     (or notebook-name "untitled"))
+                                              nil ".py")))
+                               (with-temp-file temp-file
+                                 (insert python-content))
+                               (setq ycmd--notebook-base-file temp-file)
+                               (setq ycmd--notebook-base-content python-content)
+                               (setq ycmd--notebook-base-initialized nil)
+                               temp-file))))
+                      ;; For regular files
+                      ((buffer-file-name)
+                       (ycmd--strip-tramp-path (buffer-file-name)))
+                      ;; Fallback
+                      (t ""))))
+         (file-types (or (ycmd-major-mode-to-file-types major-mode)
+                         '("generic")))
+         ;; Determine what content to send based on mode
+         (file-data-content
+          (pcase ycmd-send-file-contents-mode
+            ('never
+             ;; Only send file types, server reads from disk
+             `((filetypes . ,file-types)))
+            ('smart
+             ;; Send minimal data: diff for modified files
+             (cond
+              ;; Notebook handling
+              (notebook-data
+               (let* ((base-file (ycmd--ensure-notebook-base-file))
+                      (current-content (car notebook-data)))
+                 (cond
+                  ;; First time - send full contents to initialize server
+                  ((not ycmd--notebook-base-initialized)
+                   (setq ycmd--notebook-base-initialized t)
+                   (setq ycmd--notebook-base-content current-content)
+                   ;; Update base file with current content
+                   (with-temp-file base-file
+                     (insert current-content))
+                   ;; Tell server to create this file if it doesn't exist
+                   `((contents . ,(ycmd--encode-string current-content))
+                     (filetypes . ,file-types)
+                     (create_if_needed . t)))
+                  ;; After save - need to update server's base file
+                  (ycmd--notebook-needs-base-update
+                   (setq ycmd--notebook-needs-base-update nil)
+                   ;; Check if content changed from base
+                   (if (string= current-content ycmd--notebook-base-content)
+                       ;; No changes, just send filetypes
+                       `((filetypes . ,file-types))
+                     ;; Send diff with create_if_needed to update base
+                     (let ((diff (ycmd--generate-diff-from-file
+                                 base-file current-content)))
+                       (if (string-empty-p diff)
+                           `((filetypes . ,file-types))
+                         `((diff . ,(ycmd--encode-string diff))
+                           (filetypes . ,file-types)
+                           (create_if_needed . t))))))
+                  ;; Content unchanged from base - just send filetypes
+                  ((string= current-content ycmd--notebook-base-content)
+                   `((filetypes . ,file-types)))
+                  ;; Content changed - send diff without updating base
+                  (t
+                   (let ((diff (ycmd--generate-diff-from-file
+                               base-file current-content)))
+                     (if (string-empty-p diff)
+                         ;; No diff means no actual changes
+                         `((filetypes . ,file-types))
+                       ;; Send the diff without create_if_needed
+                       `((diff . ,(ycmd--encode-string diff))
+                         (filetypes . ,file-types))))))))
+              ;; Regular file (including TRAMP) - modified
+              ((buffer-modified-p)
+               (let* ((file-name (buffer-file-name))
+                      (current-content (buffer-substring-no-properties
+                                       (point-min) (point-max))))
+                 (if (and file-name (file-exists-p file-name))
+                     ;; Generate diff against file on disk (or TRAMP cache)
+                     (let ((diff (ycmd--generate-diff-from-file
+                                 file-name current-content)))
+                       (if (string-empty-p diff)
+                           ;; No actual changes
+                           `((filetypes . ,file-types))
+                         ;; Send diff
+                         `((diff . ,(ycmd--encode-string diff))
+                           (filetypes . ,file-types))))
+                   ;; New unsaved file - send full content
+                   `((contents . ,(ycmd--encode-string current-content))
+                     (filetypes . ,file-types)))))
+              ;; Unmodified file - server reads from disk
+              (t
+               `((filetypes . ,file-types)))))
+            ('diff
+             ;; Always try to send diff
+             (cond
+              (notebook-data
+               (let* ((base-file (ycmd--ensure-notebook-base-file))
+                      (current-content (car notebook-data)))
+                 (if (not ycmd--notebook-base-initialized)
+                     ;; First time - must send full contents
+                     (progn
+                       (setq ycmd--notebook-base-initialized t)
+                       (setq ycmd--notebook-base-content current-content)
+                       (with-temp-file base-file
+                         (insert current-content))
+                       `((contents . ,(ycmd--encode-string current-content))
+                         (filetypes . ,file-types)
+                         (create_if_needed . t)))
+                   ;; Generate diff from base file
+                   (let ((diff (ycmd--generate-diff-from-file
+                               base-file current-content)))
+                     `((diff . ,(ycmd--encode-string diff))
+                       (filetypes . ,file-types))))))
+              ((and (buffer-file-name) (file-exists-p (buffer-file-name)))
+               (let ((diff (ycmd--generate-diff-from-file
+                           (buffer-file-name)
                            (buffer-substring-no-properties
                             (point-min) (point-max)))))
-         (file-types (or (ycmd-major-mode-to-file-types major-mode)
-                         '("generic"))))
-    `(("file_data" .
-       ((,full-path . (("contents" . ,file-contents)
-                       ("filetypes" . ,file-types)))))
-      ("filepath" . ,full-path)
-      ("line_num" . ,line-num)
-      ("column_num" . ,column-num))))
+                 `((diff . ,(ycmd--encode-string diff))
+                   (filetypes . ,file-types))))
+              (t
+               `((contents . ,(ycmd--encode-string
+                              (buffer-substring-no-properties
+                               (point-min) (point-max))))
+                 (filetypes . ,file-types)))))
+            (_
+             ;; Default: always send full contents
+             `((contents . ,(ycmd--encode-string
+                            (if notebook-data
+                                (car notebook-data)
+                              (buffer-substring-no-properties
+                               (point-min) (point-max)))))
+               (filetypes . ,file-types))))))
+    `((file_data .
+       ((,full-path . ,file-data-content)))
+      (filepath . ,full-path)
+      (line_num . ,line-num)
+      (column_num . ,column-num))))
+
+;; Hook to update notebook base file after saves
+;; (add-hook 'ein:notebook-mode-hook
+;;           (lambda ()
+;;             ;; Ensure base file exists when entering notebook mode
+;;             (ycmd--ensure-notebook-base-file)))
+
+(add-hook 'ycmd-mode-hook
+          (lambda ()
+            ;; Ensure base file exists when enabling ycmd-mode in a notebook
+            (when (and (boundp 'ein:notebook-mode) ein:notebook-mode)
+              (ycmd--ensure-notebook-base-file))))
+
+(add-hook 'after-save-hook
+          (lambda ()
+            ;; Update notebook base file after saving
+            (when (and (boundp 'ein:notebook-mode) ein:notebook-mode)
+              (ycmd--update-notebook-base-file))))
 
 
 (defvar ycmd--log-enabled nil
