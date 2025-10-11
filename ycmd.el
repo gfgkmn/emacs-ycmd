@@ -2376,6 +2376,12 @@ If `ycmd-bypass-url-proxy-services' is non-nil, prepend
 
 (defun ycmd--start-server ()
   "Start a new server and return the process."
+  (ycmd--with-all-ycmd-buffers
+    (when (ycmd--is-notebook-buffer)
+      (setq ycmd--notebook-base-file nil      ; Resets this buffer's local variable
+            ycmd--notebook-base-content nil   ; Resets this buffer's local variable
+            ycmd--notebook-base-initialized nil)))
+
   (unless (ycmd-server-command)
     (user-error "Error: The variable `ycmd-server-command' is not set.  \
 See the docstring of the variable for an example"))
