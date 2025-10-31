@@ -89,6 +89,15 @@ feature."
   "Show kind of completion entry."
   :type 'boolean)
 
+(defcustom company-ycmd-debug nil
+  "When non-nil, emit debug messages to *Messages* for troubleshooting."
+  :type 'boolean)
+
+(defun company-ycmd--log (format-string &rest args)
+  "Log FORMAT-STRING and ARGS when `company-ycmd-debug' is non-nil."
+  (when company-ycmd-debug
+    (apply #'message (concat "[company-ycmd] " format-string) args)))
+
 (defcustom company-ycmd-request-sync-timeout 0.05
   "Timeout for synchronous ycmd completion request.
 When 0, do not use synchronous completion request at all."
@@ -469,6 +478,8 @@ candidates list."
 
 If CB is non-nil, call it with candidates."
   (let-alist completions
+    (company-ycmd--log "response received: %d completions (prefix=\"%s\" start-col=%s)"
+                       (length .completions) prefix .completion_start_column)
     (funcall
      (or cb 'identity)
      (company-ycmd--construct-candidates
@@ -479,16 +490,25 @@ If CB is non-nil, call it with candidates."
   "Get completion candidates with PREFIX and call CB deferred."
   (let ((request-window (selected-window))
         (request-point (point))
+        (request-column (current-column))
         (request-tick (buffer-chars-modified-tick)))
-    (ycmd-with-handled-server-exceptions (deferred:try (ycmd-get-completions)
-                                           :catch (lambda (_err) nil))
+    (company-ycmd--log "async request dispatched (prefix=\"%s\" point=%d column=%d)"
+                       prefix request-point request-column)
+    (ycmd-with-handled-server-exceptions
+        (deferred:try (ycmd-get-completions)
+                      :catch (lambda (_err)
+                               (company-ycmd--log "server exception during completion request")
+                               nil))
       :bind-current-buffer t
       (if (or (not (equal request-window (selected-window)))
               (with-current-buffer (window-buffer request-window)
                 (or (not (equal request-buffer (current-buffer)))
                     (not (equal request-point (point)))
                     (not (equal request-tick (buffer-chars-modified-tick))))))
-          (message "Skip ycmd completion response")
+          (progn
+            (company-ycmd--log "discarded stale completion response (window/buffer/point changed)")
+            (unless company-ycmd-debug
+              (message "Skip ycmd completion response")))
         (company-ycmd--get-candidates response prefix cb)))))
 
 (defun company-ycmd--meta (candidate)
@@ -528,16 +548,30 @@ If CB is non-nil, call it with candidates."
 
 (defun company-ycmd--prefix ()
   "Prefix-command handler for the company backend."
-  (and ycmd-mode
-       buffer-file-name
-       (ycmd-running-p)
-       (or (not (company-in-string-or-comment))
-           (company-ycmd--in-include))
-       (or (company-grab-symbol-cons "\\.\\|->\\|::\\|/" 2)
-           'stop)))
+  (cond
+   ((not ycmd-mode)
+    (company-ycmd--log "prefix aborted: ycmd-mode disabled in buffer %s" (buffer-name))
+    nil)
+   ((not buffer-file-name)
+    (company-ycmd--log "prefix aborted: buffer %s has no backing file" (buffer-name))
+    nil)
+   ((not (ycmd-running-p))
+    (company-ycmd--log "prefix aborted: ycmd server not running")
+    nil)
+   ((and (company-in-string-or-comment)
+         (not (company-ycmd--in-include)))
+    (company-ycmd--log "prefix aborted: inside string/comment outside include context")
+    nil)
+   (t
+    (let ((symbol (company-grab-symbol-cons "\\.\\|->\\|::\\|/" 2)))
+      (company-ycmd--log "prefix result: %s (point=%d column=%d)"
+                         (if symbol symbol 'stop) (point) (current-column))
+      (if symbol symbol 'stop)))))
 
 (defun company-ycmd--candidates (prefix)
   "Candidates-command handler for the company backend for PREFIX."
+  (company-ycmd--log "candidates requested for prefix \"%s\" (buffer=%s)"
+                     prefix (buffer-name))
   (let ((fetcher (cons :async
                        (lambda (cb)
                          (company-ycmd--get-candidates-deferred prefix cb)))))
@@ -545,6 +579,8 @@ If CB is non-nil, call it with candidates."
         (let ((result (ycmd-deferred:sync!
                        (ycmd-deferred:timeout company-ycmd-request-sync-timeout
                          (funcall (cdr fetcher) nil)))))
+          (company-ycmd--log "sync wait finished (%s)"
+                             (if (eq result 'timeout) "timeout" "success"))
           (if (eq result 'timeout) fetcher result))
       fetcher)))
 
@@ -584,6 +620,50 @@ swift mode."
   (-when-let* ((filepath (get-text-property 0 'filepath candidate))
                (line-num (get-text-property 0 'line_num candidate)))
     (cons filepath line-num)))
+
+(defun company-ycmd--restore-backends (had-local original)
+  "Restore `company-backends' after a temporary override.
+
+HAD-LOCAL indicates whether the variable was buffer-local before the override.
+ORIGINAL is the value to restore."
+  (if had-local
+      (setq company-backends original)
+    (kill-local-variable 'company-backends)))
+
+;;;###autoload
+(defun company-ycmd-manual-begin ()
+  "Temporarily use only `company-ycmd' to trigger manual completion.
+
+Ensures `ycmd-mode' and `company-mode' are active, swaps in
+`company-ycmd' as the sole backend for the duration of the
+request, and then restores the previous state."
+  (interactive)
+  (unless (featurep 'company)
+    (user-error "company-mode is not available"))
+  (let* ((ycmd-was-active (bound-and-true-p ycmd-mode))
+         (company-was-active (bound-and-true-p company-mode))
+         (had-local-backends (local-variable-p 'company-backends))
+         (original-backends (when (boundp 'company-backends) company-backends)))
+    (company-ycmd--log "manual begin invoked (ycmd-active=%s company-active=%s)"
+                       ycmd-was-active company-was-active)
+    (unless ycmd-was-active
+      (company-ycmd--log "enabling ycmd-mode temporarily")
+      (ycmd-mode 1))
+    (unless company-was-active
+      (company-ycmd--log "enabling company-mode temporarily")
+      (company-mode 1))
+    (unwind-protect
+        (progn
+          (company-ycmd--log "setting temporary backend to company-ycmd")
+          (setq-local company-backends '(company-ycmd))
+          (company-manual-begin))
+      (company-ycmd--restore-backends had-local-backends original-backends)
+      (unless company-was-active
+        (company-ycmd--log "restoring company-mode to disabled state")
+        (company-mode -1))
+      (unless ycmd-was-active
+        (company-ycmd--log "restoring ycmd-mode to disabled state")
+        (ycmd-mode -1)))))
 
 (defun company-ycmd (command &optional arg &rest ignored)
   "The company-backend command handler for ycmd."
