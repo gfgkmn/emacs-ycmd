@@ -153,10 +153,6 @@ Options are:
           (const :tag "Ask the user" ask))
   :risky t)
 
-(defcustom ycmd-host-mapping (make-hash-table :test 'equal)
-  "Mapping of host names to their actual addresses for ycmd server connection.")
-
-
 (defcustom ycmd-wifi-name nil
   "List of Wi-Fi network names for YCMD server connectivity.
 Set this to enable YCMD on specific Wi-Fi networks by adding the network names to this list."
@@ -170,12 +166,24 @@ localhost port forwarding and localhost ip instead. Example configuration:
 '(\"office-wifi\" \"company-network\")"
   :type '(string))
 
+(defcustom ycmd-machine-profiles nil
+  "Alist mapping machine names to their configuration profiles.
+Each entry is (MACHINE-NAME . PROFILES-ALIST) where PROFILES-ALIST
+is ((PROFILE-NAME . CONFIG-PLIST) ...).
 
-(defcustom ycmd-python-path-mapping (make-hash-table :test 'equal)
-  "Mapping of host names to their actual python path for ycmd server connection.")
+CONFIG-PLIST contains:
+  :host - Server host address (used when on office wifi)
+  :port - Server port
+  :python-path - Python binary path for ycmd
+  :server-command - List for server command
 
-(defcustom ycmd-server-command-mapping (make-hash-table :test 'equal)
-  "Mapping of host names to their actual server-command for ycmd server connection.")
+The first profile in each machine's list is the default."
+  :type '(alist :key-type string
+                :value-type (alist :key-type string :value-type plist)))
+
+(defvar ycmd-current-machine-profile (make-hash-table :test 'equal)
+  "Hash table mapping machine names to their current active profile name.")
+
 
 (defcustom ycmd-server-args '("--log=debug"
                               "--keep_logfile"
@@ -566,17 +574,6 @@ and `company-keywords'.")
 This is set based on the value of `ycmd-server-port' if set, or
 the value from the output of the server itself.")
 
-(defvar ycmd-port-mapping (make-hash-table :test 'equal)
-  "Hash table mapping host names to YCMD server port numbers.
-
-Use this variable to associate specific host names with the corresponding port
-numbers on which the YouCompleteMe Daemon (YCMD) is running. The hash table uses
-string equality for keys, allowing for precise host name matching.
-
-Example Usage:
-(puthash \"localhost\" 12345 ycmd-port-mapping)
-(puthash \"my-workstation\" 54321 ycmd-port-mapping)")
-
 (defvar ycmd--server-process-name-dict (make-hash-table :test 'equal)
   "Dictionary to store ycmd server process names for different machines.")
 
@@ -731,32 +728,54 @@ Each element should be an alist with the following keys:
      (cancel-timer ,timer)
      (setq ,timer nil)))
 
+(defun ycmd--expand-path (path)
+  "Expand PATH only if it contains ~, otherwise return as-is."
+  (if (string-prefix-p "~" path)
+      (expand-file-name path)
+    path))
 
-(defun ycmd-get-host ()
-  (let ((wifi-name (or ycmd-wifi-name
-                       current-wifi-name)))
-    (if (string-match-p (concat ".*" ycmd-office-wifi-name ".*") wifi-name)
-        (gethash (if (stringp (ycmd--get-current-machine))
-                     (ycmd--get-current-machine)
-                   (prin1-to-string (ycmd--get-current-machine)))
-                 ycmd-host-mapping)
-      "127.0.0.1")))
+(defun ycmd--get-machine-profiles (machine)
+  "Get all profiles for MACHINE."
+  (cdr (assoc machine ycmd-machine-profiles)))
+
+(defun ycmd--get-current-profile-name (machine)
+  "Get current profile name for MACHINE, or first available."
+  (or (gethash machine ycmd-current-machine-profile)
+      (car (car (ycmd--get-machine-profiles machine)))))
+
+(defun ycmd--get-machine-config (machine)
+  "Get current config plist for MACHINE."
+  (let* ((profiles (ycmd--get-machine-profiles machine))
+         (profile-name (ycmd--get-current-profile-name machine)))
+    (cdr (assoc profile-name profiles))))
 
 (defun ycmd-get-server-port ()
-  (string-to-number (gethash (if (stringp (ycmd--get-current-machine))
-                                 (ycmd--get-current-machine)
-                               (prin1-to-string (ycmd--get-current-machine))) ycmd-port-mapping "43315")))
+  "Get port for current machine."
+  (let ((config (ycmd--get-machine-config (ycmd--get-current-machine))))
+    (or (plist-get config :port) 43315)))
+
+(defun ycmd-get-host ()
+  "Get host for current machine based on wifi."
+  (let* ((machine (ycmd--get-current-machine))
+         (config (ycmd--get-machine-config machine))
+         (wifi-name (or ycmd-wifi-name current-wifi-name)))
+    (if (and ycmd-office-wifi-name
+             (string-match-p (regexp-quote ycmd-office-wifi-name) wifi-name))
+        (or (plist-get config :host) "127.0.0.1")
+      "127.0.0.1")))
 
 (defun ycmd-get-port ()
   (gethash (ycmd--get-current-machine) ycmd--server-actual-port-dict))
 
-(defun ycmd-server-command ()
-  "Return the ycmd server command.according local or remote."
-  (gethash (ycmd--get-current-machine) ycmd-server-command-mapping))
-
 (defun ycmd-get-python-binary-path ()
-  "Get the appropriate Python binary path based on whether we're using Tramp or not."
-  (gethash (ycmd--get-current-machine) ycmd-python-path-mapping))
+  "Get Python path for current machine."
+  (let ((config (ycmd--get-machine-config (ycmd--get-current-machine))))
+    (ycmd--expand-path (plist-get config :python-path))))
+
+(defun ycmd-server-command ()
+  "Get server command for current machine."
+  (let ((config (ycmd--get-machine-config (ycmd--get-current-machine))))
+    (mapcar #'ycmd--expand-path (plist-get config :server-command))))
 
 (defun ycmd-parsing-in-progress-p ()
   "Return t if parsing is in progress."
@@ -1154,35 +1173,24 @@ process with `delete-process'."
 
 
 (defun ycmd--get-current-machine ()
-  "Get current machine identifier from default-directory or EIN buffer.
-Returns the host key from ycmd-host-mapping.
-For EIN notebooks, extracts host from buffer name.
-For regular files, uses default-directory."
+  "Get current machine identifier."
   (let ((extracted-host
          (cond
-          ;; Check if we're in an EIN buffer by buffer name pattern
           ((string-match "^ \\*ein: https?://\\([^:/]+\\)" (buffer-name))
            (match-string 1 (buffer-name)))
-          ;; Check for remote file
           ((file-remote-p default-directory)
            (file-remote-p default-directory 'host))
-          ;; Default to local
           (t "local"))))
-    ;; (message "Extracted host: %s" extracted-host)
-    ;; First check if extracted-host is already a key in the hash table
     (when (equal extracted-host "127.0.0.1")
       (setq extracted-host "local"))
-    (cond
-     ((gethash extracted-host ycmd-host-mapping)
-      extracted-host)
-     ;; If not a key, search for it as a value and return the corresponding key
-     (t
-      (let ((found-key nil))
-        (maphash (lambda (key value)
-                   (when (equal value extracted-host)
-                     (setq found-key key)))
-                 ycmd-host-mapping)
-        (or found-key "local"))))))
+    ;; Find machine by name or by host value in profiles
+    (or (and (assoc extracted-host ycmd-machine-profiles) extracted-host)
+        (cl-loop for (machine . profiles) in ycmd-machine-profiles
+                 when (cl-some (lambda (p)
+                                 (equal (plist-get (cdr p) :host) extracted-host))
+                               profiles)
+                 return machine)
+        "local")))
 
 (defun ycmd--get-server-process-name ()
   "Get ycmd server process name for current machine from dictionary.
@@ -1257,6 +1265,37 @@ IGNORE-P is non-nil ignore the ycm_extra_conf."
      (ycmd-with-handled-server-exceptions
          (ycmd--request (make-ycmd-request-data
                          :handler handler :content content))))))
+
+(defun ycmd-switch-profile (profile-name)
+  "Switch to PROFILE-NAME for current machine and restart server."
+  (interactive
+   (let* ((machine (ycmd--get-current-machine))
+          (profiles (ycmd--get-machine-profiles machine))
+          (current (ycmd--get-current-profile-name machine)))
+     (list (completing-read
+            (format "Profile for %s [current: %s]: " machine current)
+            (mapcar #'car profiles)
+            nil t))))
+  (let ((machine (ycmd--get-current-machine)))
+    (puthash machine profile-name ycmd-current-machine-profile)
+    (when (ycmd-running-p)
+      (ycmd-close)
+      (ycmd-open))
+    (let ((config (ycmd--get-machine-config machine)))
+      (message "Switched %s to profile '%s' (Python: %s)"
+               machine profile-name
+               (plist-get config :python-path)))))
+
+(defun ycmd-show-current-profile ()
+  "Show current profile info for current machine."
+  (interactive)
+  (let* ((machine (ycmd--get-current-machine))
+         (profile (ycmd--get-current-profile-name machine))
+         (config (ycmd--get-machine-config machine)))
+    (message "Machine: %s | Profile: %s | Python: %s | Port: %s"
+             machine profile
+             (plist-get config :python-path)
+             (plist-get config :port))))
 
 (defun ycmd-load-conf-file (filename)
   "Tell the ycmd server to load the configuration file FILENAME."
@@ -2721,7 +2760,9 @@ FILE-PATH can be a TRAMP path; we'll get the local cache."
        ((,full-path . ,file-data-content)))
       (filepath . ,full-path)
       (line_num . ,line-num)
-      (column_num . ,column-num))))
+      (column_num . ,column-num)
+      (extra_conf_data .
+                       ((interpreter_path . ,(ycmd-get-python-binary-path)))))))
 
 ;; Hook to update notebook base file after saves
 ;; (add-hook 'ein:notebook-mode-hook
