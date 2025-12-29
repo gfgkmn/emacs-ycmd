@@ -2540,6 +2540,72 @@ Kept for compatibility. Notebook support now uses temp .ipynb copies."
                  (buffer-file-name)))))
        (error (buffer-file-name)))))
 
+(defvar-local ycmd--notebook-kernel-cwd-cache nil
+  "Cached kernel working directory for notebook buffers.")
+
+(defvar-local ycmd--notebook-kernel-cwd-timestamp nil
+  "Timestamp of last kernel cwd query.")
+
+(defvar ycmd-notebook-cwd-cache-timeout 30
+  "Seconds before kernel cwd cache expires. Set to nil to disable caching.")
+
+(defun ycmd--get-notebook-kernel-cwd ()
+  "Get the kernel's current working directory synchronously.
+Uses a cache to avoid querying the kernel on every request."
+  (when (and (boundp 'ein:notebook-mode) ein:notebook-mode)
+    ;; Check cache validity
+    (when (or (null ycmd--notebook-kernel-cwd-cache)
+              (null ycmd--notebook-kernel-cwd-timestamp)
+              (and ycmd-notebook-cwd-cache-timeout
+                   (> (- (float-time) ycmd--notebook-kernel-cwd-timestamp)
+                      ycmd-notebook-cwd-cache-timeout)))
+      ;; Cache expired or not set, query the kernel
+      (condition-case err
+          (let* ((result nil)
+                 (done nil)
+                 (kernel (ein:get-kernel-or-error))
+                 (timeout 2.0))  ; 2 second timeout
+            (when kernel
+              (ein:kernel-when-ready
+               kernel
+               (lambda (ready-kernel)
+                 (ein:kernel-execute
+                  ready-kernel
+                  "import os; print(os.getcwd())"
+                  (list
+                   :output (cons (lambda (packed msg-type content _metadata)
+                                   (when (equal msg-type "stream")
+                                     (setq result (string-trim (plist-get content :text)))
+                                     (setq done t)))
+                                 nil)))))
+              ;; Wait for result with timeout
+              (let ((start-time (float-time)))
+                (while (and (not done)
+                            (< (- (float-time) start-time) timeout))
+                  (accept-process-output nil 0.1)))
+              ;; Update cache if we got a result
+              (when result
+                (setq ycmd--notebook-kernel-cwd-cache result)
+                (setq ycmd--notebook-kernel-cwd-timestamp (float-time)))))
+        (error
+         (message "ycmd: Failed to get kernel cwd: %s" (error-message-string err)))))
+    ycmd--notebook-kernel-cwd-cache))
+
+(defun ycmd--get-notebook-project-directory ()
+  "Get the working directory for the current notebook.
+Tries kernel's cwd first, falls back to notebook file's directory."
+  (or (ycmd--get-notebook-kernel-cwd)
+      (when-let ((path (ycmd--get-notebook-file-path)))
+        (file-name-directory path))))
+
+(defun ycmd-refresh-notebook-kernel-cwd ()
+  "Force refresh the cached kernel working directory.
+Call this after using %cd or os.chdir() in the notebook."
+  (interactive)
+  (setq ycmd--notebook-kernel-cwd-cache nil)
+  (setq ycmd--notebook-kernel-cwd-timestamp nil)
+  (when-let ((cwd (ycmd--get-notebook-kernel-cwd)))
+    (message "ycmd: Kernel cwd updated to %s" cwd)))
 
 (defvar ycmd-send-file-contents-mode 'smart
   "Controls how file contents are sent to the server.
@@ -2762,7 +2828,10 @@ FILE-PATH can be a TRAMP path; we'll get the local cache."
       (line_num . ,line-num)
       (column_num . ,column-num)
       (extra_conf_data .
-                       ((interpreter_path . ,(ycmd-get-python-binary-path)))))))
+                       ((interpreter_path . ,(ycmd-get-python-binary-path))
+                        ,@(when is-notebook
+                            (when-let ((proj-dir (ycmd--get-notebook-project-directory)))
+                              `((project_directory . ,proj-dir)))))))))
 
 ;; Hook to update notebook base file after saves
 ;; (add-hook 'ein:notebook-mode-hook

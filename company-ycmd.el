@@ -552,7 +552,8 @@ If CB is non-nil, call it with candidates."
    ((not ycmd-mode)
     (company-ycmd--log "prefix aborted: ycmd-mode disabled in buffer %s" (buffer-name))
     nil)
-   ((not buffer-file-name)
+   ((and (not buffer-file-name)
+         (not (ycmd--is-notebook-buffer)))
     (company-ycmd--log "prefix aborted: buffer %s has no backing file" (buffer-name))
     nil)
    ((not (ycmd-running-p))
@@ -584,22 +585,99 @@ If CB is non-nil, call it with candidates."
           (if (eq result 'timeout) fetcher result))
       fetcher)))
 
+(defun company-ycmd--in-python-import-p ()
+  "Check if point is in a Python import statement."
+  (and (memq major-mode '(python-mode python-ts-mode))
+       (save-excursion
+         (beginning-of-line)
+         (looking-at-p "^[[:space:]]*\\(from\\|import\\)[[:space:]]"))))
+
+(defun company-ycmd--python-params-to-yasnippet (params)
+  "Convert Python PARAMS string to yasnippet template.
+For `(examples, width=10.0)', returns `(${1:examples}, width=${2:10.0})'.
+Only values become fields, not keyword names."
+  (let ((result "")
+        (field-num 0)
+        (i 0)
+        (len (length params))
+        (in-parens 0))
+    (while (< i len)
+      (let ((char (aref params i)))
+        (cond
+         ;; Opening paren
+         ((eq char ?\()
+          (setq in-parens (1+ in-parens))
+          (setq result (concat result "(")))
+         ;; Closing paren
+         ((eq char ?\))
+          (setq in-parens (1- in-parens))
+          (setq result (concat result ")")))
+         ;; Inside arguments
+         ((> in-parens 0)
+          (cond
+           ;; Start of an argument (after '(' or ',')
+           ((and (or (eq (aref params (1- i)) ?\()
+                     (eq (aref params (1- i)) ?,)
+                     (eq (aref params (1- i)) ?\s))
+                 (not (memq char '(?\s ?, ?\)))))
+            ;; Find the argument boundaries
+            (let ((arg-start i)
+                  (arg-end i)
+                  (equals-pos nil))
+              ;; Scan to find end of argument and position of =
+              (while (and (< arg-end len)
+                          (not (memq (aref params arg-end) '(?, ?\)))))
+                (when (eq (aref params arg-end) ?=)
+                  (setq equals-pos arg-end))
+                (setq arg-end (1+ arg-end)))
+              ;; Trim trailing whitespace
+              (while (and (> arg-end arg-start)
+                          (eq (aref params (1- arg-end)) ?\s))
+                (setq arg-end (1- arg-end)))
+              (if equals-pos
+                  ;; Keyword argument: name=value
+                  (let* ((name (substring params arg-start equals-pos))
+                         (value-start (1+ equals-pos))
+                         (value (string-trim (substring params value-start arg-end))))
+                    (setq field-num (1+ field-num))
+                    (setq result (concat result name "=${" (number-to-string field-num)
+                                         ":" value "}")))
+                ;; Positional argument
+                (let ((arg (string-trim (substring params arg-start arg-end))))
+                  (setq field-num (1+ field-num))
+                  (setq result (concat result "${" (number-to-string field-num)
+                                       ":" arg "}"))))
+              (setq i (1- arg-end))))  ; -1 because loop will increment
+           ;; Comma or space - copy as-is
+           (t (setq result (concat result (char-to-string char))))))
+         ;; Outside parens - copy as-is
+         (t (setq result (concat result (char-to-string char))))))
+      (setq i (1+ i)))
+    (concat result "$0")))
+
 (defun company-ycmd--post-completion (candidate)
   "Insert function arguments after completion for CANDIDATE."
   (if (eq major-mode 'swift-mode)
       (company-ycmd--post-completion-swift candidate)
     (--when-let (and (company-ycmd--extended-features-p)
                      company-ycmd-insert-arguments
+                     (not (company-ycmd--in-python-import-p))
                      (get-text-property 0 'params candidate))
       (when (memq major-mode '(python-mode rust-mode))
         (setq it (company-ycmd--remove-self-from-function-args it))
         (when (eq major-mode 'rust-mode)
           (setq it (company-ycmd--remove-template-args-from-function-args it))))
-      (insert it)
-      (if (string-match "\\`:[^:]" it)
-          (company-template-objc-templatify it)
-        (company-template-c-like-templatify
-         (concat candidate it))))))
+      (if (and (memq major-mode '(python-mode python-ts-mode))
+               (featurep 'yasnippet))
+          ;; Python with yasnippet: only templatify values, not keyword names
+          (let ((snippet (company-ycmd--python-params-to-yasnippet it)))
+            (yas-expand-snippet snippet))
+        ;; Other modes or no yasnippet: use default behavior
+        (insert it)
+        (if (string-match "\\`:[^:]" it)
+            (company-template-objc-templatify it)
+          (company-template-c-like-templatify
+           (concat candidate it)))))))
 
 (declare-function yas-expand-snippet "yasnippet")
 (defun company-ycmd--post-completion-swift (candidate)
