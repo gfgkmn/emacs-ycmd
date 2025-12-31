@@ -2579,7 +2579,7 @@ Uses a cache to avoid querying the kernel on every request."
                                      (setq done t)))
                                  nil)
                    ;; Add execute_reply callback to prevent EIN "No callback" info message
-                   :execute_reply (cons #'ignore nil))))))
+                   :execute_reply (cons #'ignore nil)))))
               ;; Wait for result with timeout
               (let ((start-time (float-time)))
                 (while (and (not done)
